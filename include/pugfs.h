@@ -26,7 +26,7 @@ typedef enum
     PUGFS_FILE_DIR
 } pugfs_file_type_t;
 
-typedef unsigned int pugfs_fd;
+typedef int pugfs_fd;
 
 typedef struct pugfs PUGFS;
 
@@ -40,7 +40,7 @@ struct pugfs_filestat
 };
 
 int pugfs_detect(DISK_IMG *img);
-PUGFS* pugfs_format(DISK_IMG *img);
+PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors);
 PUGFS* pugfs_load(DISK_IMG *img);
 void pugfs_destroy(PUGFS *fs);
 

@@ -30,6 +30,14 @@ int main(void) {
     }
     printf("\n");
 
+    PUGFS *fs = pugfs_format(img, 2);
+    pugfs_destroy(fs);
+
+    int res = pugfs_detect(img);
+    if (res == 0) {
+        printf("Pugfs detected on disk image: %s\n", IMAGE_PATH);
+    }
+
     disk_img_stream_destroy(stream);
     disk_img_close(img);
     return 0;
