@@ -70,40 +70,6 @@ static uint32_t _pugfs_header_checksum(struct pugfs_header *header) {
         header->root_dir_starting_index;
 }
 
-int pugfs_detect(DISK_IMG *img) {
-    if (!img) return -1;
-
-    // read sector 0
-    char *buf = malloc(disk_img_get_sector_size(img));
-    if (!buf) return -2;
-    int res = disk_img_read_sectors(img, 0, 1, buf);
-    if (res != 1) {
-        free(buf);
-        return -3;
-    }
-
-    // get the header
-    const struct pugfs_header *header = (const struct pugfs_header*)buf;
-    
-    // check magic number
-    if (header->magic != PUGFS_MAGIC_NUMBER) {
-        free(buf);
-        return -4;
-    }
-
-    // verify checksum
-    int checksum = _pugfs_header_checksum(header);
-    if (checksum != header->checksum) {
-        free(buf);
-        return -5;
-    }
-
-    // TODO: more checks
-
-    free(buf);
-    return 0;
-}
-
 static int _pugfs_calculate_ftable_and_data_sizes(
     uint32_t total_sectors,
     uint32_t reserved_sectors,
@@ -147,6 +113,37 @@ static int _pugfs_calculate_ftable_and_data_sizes(
     }
 }
 
+static PUGFS* _pugfs_create(DISK_IMG *img) {
+    if (!img) return NULL;
+
+    int disk_sector_size = disk_img_get_sector_size(img);
+    if (disk_sector_size <= 0) return NULL;
+
+    uint32_t total_sectors = disk_img_get_total_sectors(img);
+    // disk is way too small
+    if (total_sectors < 100) return NULL;
+
+    PUGFS *fs = (PUGFS*)malloc(sizeof(struct pugfs));
+    if (!fs) return NULL;
+    memset(fs, 0, sizeof(struct pugfs));
+
+    fs->buf = (char*)malloc(disk_sector_size);
+    if (!fs->buf) {
+        free(fs);
+        return NULL;
+    }
+
+    fs->stream = disk_img_stream_create(img);
+    if (!fs->stream) {
+        free(fs->buf);
+        free(fs);
+        return NULL;
+    }
+    disk_img_stream_seek(fs->stream, 0, 0);
+
+    return fs;
+}
+
 PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
     if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
 
@@ -173,23 +170,8 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     );
     if (res < 0) return NULL;
 
-    PUGFS *fs = (PUGFS*)malloc(sizeof(struct pugfs));
+    PUGFS *fs = _pugfs_create(img);
     if (!fs) return NULL;
-    memset(fs, 0, sizeof(struct pugfs));
-
-    fs->buf = (char*)malloc(disk_sector_size);
-    if (!fs->buf) {
-        free(fs);
-        return NULL;
-    }
-
-    fs->stream = disk_img_stream_create(img);
-    if (!fs->stream) {
-        free(fs->buf);
-        free(fs);
-        return NULL;
-    }
-    disk_img_stream_seek(fs->stream, 0, 0);
 
     // create and write the header
     fs->header.magic = PUGFS_MAGIC_NUMBER;
@@ -206,7 +188,7 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     fs->header.data_sectors = data_sectors;
     fs->header.root_dir_starting_index = 1; // entry 1 in FTable
     fs->header.checksum = _pugfs_header_checksum(&fs->header);
-    disk_img_stream_writeb(fs->stream, sizeof(struct pugfs_header), &fs->header);
+    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_header), &fs->header);
 
     // write the FTable
     memset(fs->buf, 0, disk_sector_size);
@@ -214,11 +196,11 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     *((uint32_t*)(fs->buf) + 1) = PUGFS_FTABLE_ENTRY_EOC; // entry 1, root dir
 
     disk_img_stream_seek(fs->stream, reserved_sectors, 0);
-    disk_img_stream_writeb(fs->stream, disk_sector_size, fs->buf);
+    disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
 
     memset(fs->buf, 0, disk_sector_size);
     for (int i = 1; i < ftable_sectors; ++i) {
-        disk_img_stream_writeb(fs->stream, disk_sector_size, fs->buf);
+        disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
     }
     
     // write EOD to root dir (at cluster 1 from the data area)
@@ -226,19 +208,65 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     memset(&eod, 0, sizeof(struct pugfs_dir_entry));
     eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
     disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
-    disk_img_stream_writeb(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
+    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
 
     return fs;
 }
 
+static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img) {
+    if (!header || !img) return -1;
+
+    // check magic number
+    if (header->magic != PUGFS_MAGIC_NUMBER) return -2;
+
+    // verify header size
+    if (header->header_size != sizeof(struct pugfs_header)) return -2;
+
+    // verify disk parameters
+    int sector_size = disk_img_get_sector_size(img);
+    int total_sectors = disk_img_get_total_sectors(img);
+    if ((uint32_t)sector_size != header->sector_size || 
+        (uint32_t)total_sectors != header->total_sectors)  
+        return -2;
+
+    // verify checksum
+    int checksum = _pugfs_header_checksum(header);
+    if (checksum != header->checksum) return -2;
+
+    // TODO more checks
+
+    return 0; // header ok
+}
+
 PUGFS* pugfs_load(DISK_IMG *img) {
     if (!img) return NULL;
+
+    PUGFS *fs = _pugfs_create(img);
+    if (!fs) return NULL;
+
+    // read boot sector
+    int sector_size = disk_img_get_sector_size(img);
+    disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
+
+    // copy header
+    memcpy(&fs->header, fs->buf, sizeof(struct pugfs_header));
+
+    // check header fields
+    if (_pugfs_check_header(&fs->header, img) < 0) {
+        pugfs_destroy(fs);
+        return NULL;
+    }
+    
+    return fs;
 }
 
 void pugfs_destroy(PUGFS *fs) {
     if (fs) {
         if (fs->stream) {
             disk_img_stream_destroy(fs->stream);
+        }
+        if (fs->buf) {
+            free(fs->buf);
         }
         free(fs);
     }
@@ -250,6 +278,10 @@ int pugfs_touch(PUGFS *fs, const char *path) {
 
 int pugfs_delete(PUGFS *fs, const char *path) {
 
+}
+
+int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
+    
 }
 
 int pugfs_mkdir(PUGFS *fs, const char *path) {

@@ -123,7 +123,7 @@ static void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count) {
     stream->offset %= stream->img->sector_size;
 }
 
-int disk_img_stream_readb(DISK_IMG_STREAM *stream, int count, void *dst) {
+int disk_img_stream_read_bytes(DISK_IMG_STREAM *stream, int count, void *dst) {
     if (!stream || !stream->img || count < 0 || !dst)
         return -1;
 
@@ -156,7 +156,7 @@ int disk_img_stream_readb(DISK_IMG_STREAM *stream, int count, void *dst) {
     return bytes_read;
 }
 
-int disk_img_stream_writeb(DISK_IMG_STREAM *stream, int count, const void *src) {
+int disk_img_stream_write_bytes(DISK_IMG_STREAM *stream, int count, const void *src) {
     if (!stream || !stream->img || count < 0 || !src)
         return -1;
 
@@ -195,8 +195,8 @@ int disk_img_stream_writeb(DISK_IMG_STREAM *stream, int count, const void *src) 
     return bytes_written;
 }
 
-int disk_img_stream_read(DISK_IMG_STREAM *stream, int sectors, void *dst) {
-    if (!stream || !stream->img || !dst || sectors < 0)
+int disk_img_stream_read_sectors(DISK_IMG_STREAM *stream, int count, void *dst) {
+    if (!stream || !stream->img || !dst || count < 0)
         return -1;
 
     uint32_t sector_size = stream->img->sector_size;
@@ -204,22 +204,22 @@ int disk_img_stream_read(DISK_IMG_STREAM *stream, int sectors, void *dst) {
 
     if (sector_size == 0) return -1;
 
-    if ((uint64_t)stream->sector + sectors > total_sectors)
+    if ((uint64_t)stream->sector + count > total_sectors)
         return -1;
 
     char *cdst = (char *)dst;
-    for (int i = 0; i < sectors; ++i) {
-        int res = disk_img_stream_readb(stream, (int)sector_size, cdst);
+    for (int i = 0; i < count; ++i) {
+        int res = disk_img_stream_read_bytes(stream, (int)sector_size, cdst);
         if (res != (int)sector_size)
             return i;
         cdst += sector_size;
     }
 
-    return sectors;
+    return count;
 }
 
-int disk_img_stream_write(DISK_IMG_STREAM *stream, int sectors, const void *src) {
-    if (!stream || !stream->img || !src || sectors < 0)
+int disk_img_stream_write_sectors(DISK_IMG_STREAM *stream, int count, const void *src) {
+    if (!stream || !stream->img || !src || count < 0)
         return -1;
 
     uint32_t sector_size = stream->img->sector_size;
@@ -227,16 +227,16 @@ int disk_img_stream_write(DISK_IMG_STREAM *stream, int sectors, const void *src)
 
     if (sector_size == 0) return -1;
 
-    if ((uint64_t)stream->sector + sectors > total_sectors)
+    if ((uint64_t)stream->sector + count > total_sectors)
         return -1;
 
     const char *csrc = (const char *)src;
-    for (int i = 0; i < sectors; ++i) {
-        int res = disk_img_stream_writeb(stream, (int)sector_size, csrc);
+    for (int i = 0; i < count; ++i) {
+        int res = disk_img_stream_write_bytes(stream, (int)sector_size, csrc);
         if (res != (int)sector_size)
             return i;
         csrc += sector_size;
     }
 
-    return sectors;
+    return count;
 }

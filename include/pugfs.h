@@ -39,13 +39,13 @@ struct pugfs_filestat
     uint8_t attributes;
 };
 
-int pugfs_detect(DISK_IMG *img);
 PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
 PUGFS* pugfs_load(DISK_IMG *img);
 void pugfs_destroy(PUGFS *fs);
 
 int pugfs_touch(PUGFS *fs, const char *path);
 int pugfs_delete(PUGFS *fs, const char *path);
+int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size);
 int pugfs_mkdir(PUGFS *fs, const char *path);
 int pugfs_rmdir(PUGFS *fs, const char *path);
 int pugfs_lsdir(PUGFS *fs, const char *path, char **list_out, size_t start_index, size_t max_entries);
