@@ -23,7 +23,7 @@ int disk_img_stream_seek(DISK_IMG_STREAM *stream, uint32_t sector, uint32_t offs
 int disk_img_stream_readb(DISK_IMG_STREAM *stream, int count, void *dst);
 int disk_img_stream_writeb(DISK_IMG_STREAM *stream, int count, const void *src);
 
-int disk_img_stream_read(DISK_IMG_STREAM *stream, int count, void *dst);
-int disk_img_stream_write(DISK_IMG_STREAM *stream, int count, const void *src);
+int disk_img_stream_read(DISK_IMG_STREAM *stream, int nmemb, void *dst);
+int disk_img_stream_write(DISK_IMG_STREAM *stream, int nmemb, const void *src);
 
 #endif

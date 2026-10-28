@@ -17,6 +17,7 @@ struct pugfs_header
     uint32_t magic;                     // 0xBEEFFEED
     uint16_t version;
     uint16_t sector_size;
+    uint16_t sectors_per_cluster;       // for data region
     uint16_t header_size;
     uint16_t flags;
     uint32_t total_sectors;             // total sectors in the image
@@ -32,7 +33,7 @@ struct pugfs_header
 
 ### File Table
 
-- 1 DW entry per sector
+- 1 DW entry per cluster
 - Entry 0 is reserved so the index can start at 1
 
 | Ftable Value | Meaning |
@@ -40,9 +41,9 @@ struct pugfs_header
 | `0x00000000` | Free |
 | `0xFFFFFFFC` | End of chain |
 | `0xFFFFFFFD` | Reserved |
-| `0xFFFFFFFE` | Bad sector |
+| `0xFFFFFFFE` | Bad cluster |
 | `0xFFFFFFFF` | Invalid/unallocated reference |
-| `0x00000001` – `0xFFFFFFFB` | Next sector index |
+| `0x00000001` – `0xFFFFFFFB` | Next cluster index |
 
 ### Directories
 
@@ -58,7 +59,7 @@ struct pugfs_dir_entry
     uint32_t size;                       // 4 bytes
     uint32_t creation_ts;                // 4 bytes
     uint32_t last_access_ts;             // 4 bytes
-    uint32_t starting_sector_index;      // 4 bytes
+    uint32_t starting_cluster_index;     // 4 bytes
     uint8_t reserved[13];                // 13 bytes
 } __attribute__((packed));               // total 64 bytes
 ```

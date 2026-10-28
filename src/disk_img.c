@@ -194,3 +194,49 @@ int disk_img_stream_writeb(DISK_IMG_STREAM *stream, int count, const void *src) 
 
     return bytes_written;
 }
+
+int disk_img_stream_read(DISK_IMG_STREAM *stream, int sectors, void *dst) {
+    if (!stream || !stream->img || !dst || sectors < 0)
+        return -1;
+
+    uint32_t sector_size = stream->img->sector_size;
+    uint32_t total_sectors = stream->img->total_sectors;
+
+    if (sector_size == 0) return -1;
+
+    if ((uint64_t)stream->sector + sectors > total_sectors)
+        return -1;
+
+    char *cdst = (char *)dst;
+    for (int i = 0; i < sectors; ++i) {
+        int res = disk_img_stream_readb(stream, (int)sector_size, cdst);
+        if (res != (int)sector_size)
+            return i;
+        cdst += sector_size;
+    }
+
+    return sectors;
+}
+
+int disk_img_stream_write(DISK_IMG_STREAM *stream, int sectors, const void *src) {
+    if (!stream || !stream->img || !src || sectors < 0)
+        return -1;
+
+    uint32_t sector_size = stream->img->sector_size;
+    uint32_t total_sectors = stream->img->total_sectors;
+
+    if (sector_size == 0) return -1;
+
+    if ((uint64_t)stream->sector + sectors > total_sectors)
+        return -1;
+
+    const char *csrc = (const char *)src;
+    for (int i = 0; i < sectors; ++i) {
+        int res = disk_img_stream_writeb(stream, (int)sector_size, csrc);
+        if (res != (int)sector_size)
+            return i;
+        csrc += sector_size;
+    }
+
+    return sectors;
+}

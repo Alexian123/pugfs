@@ -40,7 +40,7 @@ struct pugfs_filestat
 };
 
 int pugfs_detect(DISK_IMG *img);
-PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors);
+PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
 PUGFS* pugfs_load(DISK_IMG *img);
 void pugfs_destroy(PUGFS *fs);
 

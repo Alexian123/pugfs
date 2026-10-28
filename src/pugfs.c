@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #define PUGFS_MAGIC_NUMBER  0xBEEFFEED
 #define PUGFS_VERSION       1
@@ -14,8 +15,8 @@
 #define PUGFS_FTABLE_ENTRY_RESERVED         0xFFFFFFFD
 #define PUGFS_FTABLE_ENTRY_BAD              0xFFFFFFFE
 #define PUGfS_FTABLE_ENTRY_INVALID          0xFFFFFFFF
-#define PUGFS_FTABLE_ENTRY_SECTOR_ID_MIN    0x00000001
-#define PUGFS_FTABLE_ENTRY_SECTOR_ID_MAX    0xFFFFFFFB
+#define PUGFS_FTABLE_ENTRY_CLUSTER_MIN      0x00000001
+#define PUGFS_FTABLE_ENTRY_CLUSTER_MAX      0xFFFFFFFB
 
 #define PUGFS_DIR_ENTRY_TYPE_EOD        0xFF    // marks the end of directory, not a real file
 #define PUGFS_DIR_ENTRY_TYPE_BAD        0xFE    // bad or corrupted entry
@@ -24,10 +25,11 @@
 
 struct pugfs_header
 {
-    uint8_t padding[3];                 // short jump + nop
-    uint32_t magic;                     // easy id
+    uint8_t padding[3];                 // short jump + nop (on bootable disks)
+    uint32_t magic;                     // 0xBEEFFEED
     uint16_t version;
     uint16_t sector_size;
+    uint16_t sectors_per_cluster;       // for data region
     uint16_t header_size;
     uint16_t flags;
     uint32_t total_sectors;             // total sectors in the image
@@ -48,7 +50,7 @@ struct pugfs_dir_entry
     uint32_t size;                       // 4 bytes
     uint32_t creation_ts;                // 4 bytes
     uint32_t last_access_ts;             // 4 bytes
-    uint32_t starting_sector_index;      // 4 bytes
+    uint32_t starting_cluster_index;     // 4 bytes
     uint8_t reserved[13];                // 13 bytes
 } __attribute__((packed));               // total 64 bytes
 
@@ -102,8 +104,51 @@ int pugfs_detect(DISK_IMG *img) {
     return 0;
 }
 
-PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors) {
-    if (!img || reserved_sectors < 1) return NULL;
+static int _pugfs_calculate_ftable_and_data_sizes(
+    uint32_t total_sectors,
+    uint32_t reserved_sectors,
+    uint16_t sectors_per_cluster,
+    uint32_t entries_per_sector,
+    uint32_t *ftable_sectors_out,
+    uint32_t *data_sectors_out
+) {
+    if (sectors_per_cluster == 0 ||
+        entries_per_sector == 0 ||
+        reserved_sectors >= total_sectors ||
+        !ftable_sectors_out ||
+        !data_sectors_out) {
+        return -1;
+    }
+
+    uint32_t available_sectors = total_sectors - reserved_sectors;
+    uint32_t data_clusters = available_sectors / sectors_per_cluster;
+
+    for (int i = INT32_MIN; i < INT32_MAX; ++i) {
+        uint32_t ftable_entries = data_clusters + 1;
+
+        uint32_t ftable_sectors = ftable_entries / entries_per_sector;
+        if (ftable_entries % entries_per_sector != 0) {
+            ++ftable_sectors;
+        }
+
+        if (ftable_sectors >= available_sectors)
+            return -1;
+
+        uint32_t data_sectors = available_sectors - ftable_sectors;
+        uint32_t new_data_clusters = data_sectors / sectors_per_cluster;
+
+        if (new_data_clusters >= data_clusters) {
+            *ftable_sectors_out = ftable_sectors;
+            *data_sectors_out = data_sectors;
+            return 0;
+        }
+
+        data_clusters = new_data_clusters;
+    }
+}
+
+PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
+    if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
 
     int disk_sector_size = disk_img_get_sector_size(img);
     if (disk_sector_size <= 0) return NULL;
@@ -112,13 +157,21 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors) {
     // disk is way too small
     if (total_sectors < 100) return NULL;
 
-    if (reserved_sectors >= total_sectors - 1) return NULL;
+    if (sectors_per_cluster >= total_sectors) return NULL;
 
-    uint32_t ftable_bytes = (total_sectors - reserved_sectors) * PUGFS_FTABLE_ENTRY_BYTES;
-    uint32_t ftable_sectors = ftable_bytes / disk_sector_size;
-    if (ftable_bytes % disk_sector_size != 0) {
-        ++ftable_sectors;
-    }
+    uint32_t entries_per_sector = (uint32_t)disk_sector_size / PUGFS_FTABLE_ENTRY_BYTES;
+    if (entries_per_sector == 0) return NULL;
+
+    uint32_t ftable_sectors = 0, data_sectors = 0;
+    int res = _pugfs_calculate_ftable_and_data_sizes(
+        total_sectors,
+        reserved_sectors,
+        sectors_per_cluster,
+        entries_per_sector,
+        &ftable_sectors,
+        &data_sectors
+    );
+    if (res < 0) return NULL;
 
     PUGFS *fs = (PUGFS*)malloc(sizeof(struct pugfs));
     if (!fs) return NULL;
@@ -142,6 +195,7 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors) {
     fs->header.magic = PUGFS_MAGIC_NUMBER;
     fs->header.version = PUGFS_VERSION;
     fs->header.sector_size = disk_sector_size;
+    fs->header.sectors_per_cluster = sectors_per_cluster;
     fs->header.header_size = sizeof(struct pugfs_header);
     fs->header.flags = 0x0; // unused for now
     fs->header.total_sectors = total_sectors;
@@ -149,7 +203,7 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors) {
     fs->header.ftable_start_sector = reserved_sectors;
     fs->header.ftable_sectors = ftable_sectors;
     fs->header.data_start_sector = reserved_sectors + ftable_sectors;
-    fs->header.data_sectors = total_sectors - reserved_sectors - ftable_sectors;
+    fs->header.data_sectors = data_sectors;
     fs->header.root_dir_starting_index = 1; // entry 1 in FTable
     fs->header.checksum = _pugfs_header_checksum(&fs->header);
     disk_img_stream_writeb(fs->stream, sizeof(struct pugfs_header), &fs->header);
@@ -167,7 +221,7 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors) {
         disk_img_stream_writeb(fs->stream, disk_sector_size, fs->buf);
     }
     
-    // write EOD to root dir (at sector 1 from the data area)
+    // write EOD to root dir (at cluster 1 from the data area)
     struct pugfs_dir_entry eod;
     memset(&eod, 0, sizeof(struct pugfs_dir_entry));
     eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
