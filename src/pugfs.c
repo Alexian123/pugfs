@@ -63,6 +63,227 @@ struct pugfs
     char *buf;
 };
 
+// return 0 on equal, <0 if e1 < e2, >0 if e1 > e2
+typedef int (*dir_entry_compare_func_t)(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
+
+// fs validation
+static uint32_t _pugfs_header_checksum(struct pugfs_header *header);
+static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img);
+
+// fs creation
+static int _pugfs_calculate_ftable_and_data_sizes(
+    uint32_t total_sectors,
+    uint32_t reserved_sectors,
+    uint16_t sectors_per_cluster,
+    uint32_t entries_per_sector,
+    uint32_t *ftable_sectors_out,
+    uint32_t *data_sectors_out
+);
+static PUGFS* _pugfs_create(DISK_IMG *img);
+
+// ftable access
+static uint32_t _pugfs_read_ftable_entry(PUGFS *fs, uint32_t index);
+static int _pugfs_write_ftable_entry(PUGFS *fs, uint32_t index, uint32_t value);
+
+// cluster chain management
+static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out);
+static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out);
+static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster_index);
+
+// functions for comparing directory entries
+static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
+static int _pugfs_compare_dir_entries_by_type(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
+
+// query functions for finding directory entries
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_data_cluster(
+    PUGFS *fs,
+    uint32_t cluster_index, 
+    const struct pugfs_dir_entry *entry_to_find, 
+    dir_entry_compare_func_t cmp
+);
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_dir(
+    PUGFS *fs,
+    const struct pugfs_dir_entry *entry_to_find, 
+    dir_entry_compare_func_t cmp,
+    struct pugfs_dir_entry *dir
+);
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_absolute(PUGFS *fs, const char *path);
+
+PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
+    if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
+
+    int disk_sector_size = disk_img_get_sector_size(img);
+    if (disk_sector_size <= 0) return NULL;
+
+    if ((uint32_t) disk_sector_size < sizeof(struct pugfs_dir_entry))
+        return NULL;
+
+    uint32_t total_sectors = disk_img_get_total_sectors(img);
+    // disk is way too small
+    if (total_sectors < 100) return NULL;
+
+    if (sectors_per_cluster >= total_sectors) return NULL;
+
+    uint32_t entries_per_sector = (uint32_t)disk_sector_size / PUGFS_FTABLE_ENTRY_BYTES;
+    if (entries_per_sector == 0) return NULL;
+
+    uint32_t ftable_sectors = 0, data_sectors = 0;
+    int res = _pugfs_calculate_ftable_and_data_sizes(
+        total_sectors,
+        reserved_sectors,
+        sectors_per_cluster,
+        entries_per_sector,
+        &ftable_sectors,
+        &data_sectors
+    );
+    if (res < 0) return NULL;
+
+    PUGFS *fs = _pugfs_create(img);
+    if (!fs) return NULL;
+
+    // create and write the header
+    fs->header.magic = PUGFS_MAGIC_NUMBER;
+    fs->header.version = PUGFS_VERSION;
+    fs->header.sector_size = disk_sector_size;
+    fs->header.sectors_per_cluster = sectors_per_cluster;
+    fs->header.header_size = sizeof(struct pugfs_header);
+    fs->header.flags = 0x0; // unused for now
+    fs->header.total_sectors = total_sectors;
+    fs->header.reserved_sectors = reserved_sectors;
+    fs->header.ftable_start_sector = reserved_sectors;
+    fs->header.ftable_sectors = ftable_sectors;
+    fs->header.data_start_sector = reserved_sectors + ftable_sectors;
+    fs->header.data_sectors = data_sectors;
+    fs->header.root_dir_starting_index = 1; // entry 1 in FTable
+    fs->header.checksum = _pugfs_header_checksum(&fs->header);
+    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_header), &fs->header);
+
+    // write the FTable
+    memset(fs->buf, 0, disk_sector_size);
+    *(uint32_t*)(fs->buf) = PUGFS_FTABLE_ENTRY_RESERVED; // entry 0, not used
+    *((uint32_t*)(fs->buf) + 1) = PUGFS_FTABLE_ENTRY_EOC; // entry 1, root dir
+
+    disk_img_stream_seek(fs->stream, reserved_sectors, 0);
+    disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+
+    memset(fs->buf, 0, disk_sector_size);
+    for (int i = 1; i < ftable_sectors; ++i) {
+        disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+    }
+    
+    // write EOD to root dir (at cluster 1 from the data area)
+    struct pugfs_dir_entry eod;
+    memset(&eod, 0, sizeof(struct pugfs_dir_entry));
+    eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
+    disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
+    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
+
+    return fs;
+}
+
+PUGFS* pugfs_load(DISK_IMG *img) {
+    if (!img) return NULL;
+
+    PUGFS *fs = _pugfs_create(img);
+    if (!fs) return NULL;
+
+    // read boot sector
+    int sector_size = disk_img_get_sector_size(img);
+    disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
+
+    // copy header
+    memcpy(&fs->header, fs->buf, sizeof(struct pugfs_header));
+
+    // check header fields
+    if (_pugfs_check_header(&fs->header, img) < 0) {
+        pugfs_destroy(fs);
+        return NULL;
+    }
+    
+    return fs;
+}
+
+void pugfs_destroy(PUGFS *fs) {
+    if (fs) {
+        if (fs->stream) {
+            disk_img_stream_destroy(fs->stream);
+        }
+        if (fs->buf) {
+            free(fs->buf);
+        }
+        free(fs);
+    }
+}
+
+int pugfs_touch(PUGFS *fs, const char *path) {
+    
+    return -1;
+}
+
+int pugfs_delete(PUGFS *fs, const char *path) {
+    return -1;
+}
+
+int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
+    return -1;
+}
+
+int pugfs_mkdir(PUGFS *fs, const char *path) {
+    // ensure parent dir entry exists
+
+    // find the EOD entry in the parent 
+
+    // replace EDO with a new entry
+
+    // add anothe EOD entry (may need new cluster)
+
+    // allocate a cluster for the new dir entry
+
+    // add an eod in the new dir
+
+    return -1;
+}
+
+int pugfs_rmdir(PUGFS *fs, const char *path) {
+    return -1;
+}
+
+int pugfs_lsdir(PUGFS *fs, const char *path, char **list_out, size_t start_index, size_t max_entries) {
+    return -1;
+}
+
+int pugfs_copy(PUGFS *fs, const char *src, const char *dst) {
+    return -1;
+}
+
+int pugfs_move(PUGFS *fs, const char *src, const char *dst) {
+    return -1;
+}
+
+pugfs_fd pugfs_fopen(PUGFS *fs, const char *path, pugfs_file_mode_t mode) {
+    return -1;
+}
+
+int pugfs_fclose(PUGFS *fs, pugfs_fd fd) {
+    return -1;
+}
+
+int pugfs_fstat(PUGFS *fs, pugfs_fd fd, struct pugfs_filestat *stat) {
+    return -1;
+}
+
+int pugfs_fseek(PUGFS *fs, pugfs_fd fd, int offset, pugfs_seek_mode_t whence) {
+    return -1;
+}
+
+size_t pugfs_fread(PUGFS *fs, void *dst, size_t size, size_t nmemb, pugfs_fd fd) {
+    return 0;
+}
+
+size_t pugfs_fwrite(PUGFS *fs, const void *src, size_t size, size_t nmemb, pugfs_fd fd) {
+    return 0;
+}
+
 static uint32_t _pugfs_header_checksum(struct pugfs_header *header) {
     if (!header) return 0;
     return header->magic ^ header->version ^ header->sector_size ^
@@ -149,103 +370,6 @@ static PUGFS* _pugfs_create(DISK_IMG *img) {
     return fs;
 }
 
-PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
-    if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
-
-    int disk_sector_size = disk_img_get_sector_size(img);
-    if (disk_sector_size <= 0) return NULL;
-
-    if ((uint32_t) disk_sector_size < sizeof(struct pugfs_dir_entry))
-        return NULL;
-
-    uint32_t total_sectors = disk_img_get_total_sectors(img);
-    // disk is way too small
-    if (total_sectors < 100) return NULL;
-
-    if (sectors_per_cluster >= total_sectors) return NULL;
-
-    uint32_t entries_per_sector = (uint32_t)disk_sector_size / PUGFS_FTABLE_ENTRY_BYTES;
-    if (entries_per_sector == 0) return NULL;
-
-    uint32_t ftable_sectors = 0, data_sectors = 0;
-    int res = _pugfs_calculate_ftable_and_data_sizes(
-        total_sectors,
-        reserved_sectors,
-        sectors_per_cluster,
-        entries_per_sector,
-        &ftable_sectors,
-        &data_sectors
-    );
-    if (res < 0) return NULL;
-
-    PUGFS *fs = _pugfs_create(img);
-    if (!fs) return NULL;
-
-    // create and write the header
-    fs->header.magic = PUGFS_MAGIC_NUMBER;
-    fs->header.version = PUGFS_VERSION;
-    fs->header.sector_size = disk_sector_size;
-    fs->header.sectors_per_cluster = sectors_per_cluster;
-    fs->header.header_size = sizeof(struct pugfs_header);
-    fs->header.flags = 0x0; // unused for now
-    fs->header.total_sectors = total_sectors;
-    fs->header.reserved_sectors = reserved_sectors;
-    fs->header.ftable_start_sector = reserved_sectors;
-    fs->header.ftable_sectors = ftable_sectors;
-    fs->header.data_start_sector = reserved_sectors + ftable_sectors;
-    fs->header.data_sectors = data_sectors;
-    fs->header.root_dir_starting_index = 1; // entry 1 in FTable
-    fs->header.checksum = _pugfs_header_checksum(&fs->header);
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_header), &fs->header);
-
-    // write the FTable
-    memset(fs->buf, 0, disk_sector_size);
-    *(uint32_t*)(fs->buf) = PUGFS_FTABLE_ENTRY_RESERVED; // entry 0, not used
-    *((uint32_t*)(fs->buf) + 1) = PUGFS_FTABLE_ENTRY_EOC; // entry 1, root dir
-
-    disk_img_stream_seek(fs->stream, reserved_sectors, 0);
-    disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
-
-    memset(fs->buf, 0, disk_sector_size);
-    for (int i = 1; i < ftable_sectors; ++i) {
-        disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
-    }
-
-    // remove this later
-    // write 1 file
-    disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
-    struct pugfs_dir_entry some_file;
-    memset(&some_file, 0, sizeof(struct pugfs_dir_entry));
-    some_file.type = PUGFS_DIR_ENTRY_TYPE_FILE;
-    strcpy(some_file.name, "hello.txt");
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &some_file);
-
-    // remove this later
-    // write 1 file
-    memset(&some_file, 0, sizeof(struct pugfs_dir_entry));
-    some_file.type = PUGFS_DIR_ENTRY_TYPE_DIR;
-    strcpy(some_file.name, "world.txt");
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &some_file);
-
-    // remvove this later
-    // write EOD after 
-    struct pugfs_dir_entry eod;
-    memset(&eod, 0, sizeof(struct pugfs_dir_entry));
-    eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
-
-    
-    // uncomment this block later
-    // // write EOD to root dir (at cluster 1 from the data area)
-    // struct pugfs_dir_entry eod;
-    // memset(&eod, 0, sizeof(struct pugfs_dir_entry));
-    // eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
-    // disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
-    // disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
-
-    return fs;
-}
-
 static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img) {
     if (!header || !img) return -1;
 
@@ -271,41 +395,7 @@ static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img) {
     return 0; // header ok
 }
 
-PUGFS* pugfs_load(DISK_IMG *img) {
-    if (!img) return NULL;
-
-    PUGFS *fs = _pugfs_create(img);
-    if (!fs) return NULL;
-
-    // read boot sector
-    int sector_size = disk_img_get_sector_size(img);
-    disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
-
-    // copy header
-    memcpy(&fs->header, fs->buf, sizeof(struct pugfs_header));
-
-    // check header fields
-    if (_pugfs_check_header(&fs->header, img) < 0) {
-        pugfs_destroy(fs);
-        return NULL;
-    }
-    
-    return fs;
-}
-
-void pugfs_destroy(PUGFS *fs) {
-    if (fs) {
-        if (fs->stream) {
-            disk_img_stream_destroy(fs->stream);
-        }
-        if (fs->buf) {
-            free(fs->buf);
-        }
-        free(fs);
-    }
-}
-
-static uint32_t _pugfs_get_ftable_entry(PUGFS *fs, uint32_t index) {
+static uint32_t _pugfs_read_ftable_entry(PUGFS *fs, uint32_t index) {
     if (!fs || index > PUGFS_FTABLE_ENTRY_CLUSTER_MAX) return PUGFS_FTABLE_ENTRY_INVALID;
     uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
     if (index > data_clusters) return PUGFS_FTABLE_ENTRY_INVALID;
@@ -314,21 +404,42 @@ static uint32_t _pugfs_get_ftable_entry(PUGFS *fs, uint32_t index) {
     
     uint32_t sector = fs->header.ftable_start_sector + index / entries_per_sector;
     uint32_t offset = (index % entries_per_sector) * PUGFS_FTABLE_ENTRY_BYTES;
-    disk_img_stream_seek(fs->stream, sector, offset);
+    int res = disk_img_stream_seek(fs->stream, sector, offset);
+    if (res < 0) return PUGFS_FTABLE_ENTRY_INVALID;
 
     uint32_t entry = PUGFS_FTABLE_ENTRY_INVALID;
-    disk_img_stream_read_bytes(fs->stream, PUGFS_FTABLE_ENTRY_BYTES, &entry);
+    res = disk_img_stream_read_bytes(fs->stream, PUGFS_FTABLE_ENTRY_BYTES, &entry);
+    if (res != PUGFS_FTABLE_ENTRY_BYTES) return PUGFS_FTABLE_ENTRY_INVALID;
+    
     return entry; 
 }
 
-static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_data_cluster(PUGFS *fs, const char *name, uint32_t cluster) {
+static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2) {
+    if (!e1 || !e2) return -1;
+    return strncmp((const char*)e1->name, (const char*)e2->name, PUGFS_FILENAME_BYTES);
+}
+
+static int _pugfs_compare_dir_entries_by_type(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2) {
+    if (!e1 || !e2) return -1;
+    return e1->type - e2->type;
+}
+
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_data_cluster(
+    PUGFS *fs,
+    uint32_t cluster_index, 
+    const struct pugfs_dir_entry *entry_to_find, 
+    dir_entry_compare_func_t cmp
+) {
+    if (!fs || !entry_to_find || !cmp) return NULL;
+
     // check if cluster is in data area bounds
     uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
-    if (cluster < 1 || cluster > data_clusters) return NULL;
+    if (cluster_index < 1 || cluster_index > data_clusters) return NULL;
 
     // set stream to the starting sector
-    uint32_t start_sector = fs->header.data_start_sector + (cluster - 1) * fs->header.sectors_per_cluster;
-    disk_img_stream_seek(fs->stream, start_sector, 0);
+    uint32_t start_sector = fs->header.data_start_sector + (cluster_index - 1) * fs->header.sectors_per_cluster;
+    int res = disk_img_stream_seek(fs->stream, start_sector, 0);
+    if (res < 0) return NULL;
 
     struct pugfs_dir_entry *dir_entry = malloc(sizeof(struct pugfs_dir_entry));
     if (!dir_entry) return NULL;
@@ -345,13 +456,13 @@ static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_data_cluster(PUGFS *fs, 
         }
         bytes_read += res;
 
+        if (cmp(dir_entry, entry_to_find) == 0) {
+            return dir_entry;
+        }
+
         // check EOD
         if (dir_entry->type == PUGFS_DIR_ENTRY_TYPE_EOD) {
             break;
-        }
-
-        if (strncmp(dir_entry->name, name, PUGFS_FILENAME_BYTES) == 0) {
-            return dir_entry;
         }
     }
 
@@ -359,8 +470,13 @@ static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_data_cluster(PUGFS *fs, 
     return NULL;
 }
 
-static struct pugfs_dir_entry *_pugfs_load_dir_entry_from_dir(PUGFS *fs, const char *name, struct pugfs_dir_entry *dir) {
-    if (!fs || !name || !dir) return NULL;
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_in_dir(
+    PUGFS *fs,
+    const struct pugfs_dir_entry *entry_to_find, 
+    dir_entry_compare_func_t cmp,
+    struct pugfs_dir_entry *dir
+) {
+    if (!fs || !entry_to_find || !dir || !cmp) return NULL;
     if (dir->type != PUGFS_DIR_ENTRY_TYPE_DIR) return NULL;
 
     uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
@@ -370,13 +486,7 @@ static struct pugfs_dir_entry *_pugfs_load_dir_entry_from_dir(PUGFS *fs, const c
         if (cluster_index < 1 || cluster_index > data_clusters)
             return NULL;
 
-        uint32_t ftable_entry = _pugfs_get_ftable_entry(fs, cluster_index); 
-
-        // end of cluster chain
-        if (ftable_entry == PUGFS_FTABLE_ENTRY_EOC) {
-            struct pugfs_dir_entry *entry = _pugfs_find_dir_entry_in_data_cluster(fs, name, cluster_index);
-            return entry;
-        }
+        uint32_t ftable_entry = _pugfs_read_ftable_entry(fs, cluster_index); 
 
         // invalid entries
         if (ftable_entry == PUGFS_FTABLE_ENTRY_RESERVED ||
@@ -386,8 +496,18 @@ static struct pugfs_dir_entry *_pugfs_load_dir_entry_from_dir(PUGFS *fs, const c
             return NULL;
         }
 
-        struct pugfs_dir_entry *dir_entry = _pugfs_find_dir_entry_in_data_cluster(fs, name, cluster_index);
+        struct pugfs_dir_entry *dir_entry = _pugfs_find_dir_entry_in_data_cluster(
+            fs,
+            cluster_index,
+            entry_to_find,
+            cmp
+        );
         if (dir_entry) return dir_entry; // found it
+
+        // end of cluster chain
+        if (ftable_entry == PUGFS_FTABLE_ENTRY_EOC) {
+            break;
+        }
 
         // check if next index is valid
         if (ftable_entry < 1 || ftable_entry > data_clusters)
@@ -399,95 +519,35 @@ static struct pugfs_dir_entry *_pugfs_load_dir_entry_from_dir(PUGFS *fs, const c
     return NULL;
 }
 
-static struct pugfs_dir_entry *_pugfs_load_dir_entry_absolute(PUGFS *fs, const char *path) {
+static struct pugfs_dir_entry *_pugfs_find_dir_entry_absolute(PUGFS *fs, const char *path) {
     if (!fs || !path) return NULL;
 
     PATH *p = path_parse(path, NULL);
     if (!p) return NULL;
+    
+    // TODO: validate drive number matches between fs and path
 
-    /*
-        0:/file.txt
-        0:/folder/file.txt
-        0:/folder/file.txt
-        0:/folder/folder
-        0:/folder/folder/file.txt
-    */
-
-    // for now, try loading from the root dir only
+    struct pugfs_dir_entry *parent = &fs->root;
     PATH_TOKEN *tok = path_get_first_token(p);
-    if (!tok) {
-        path_destroy(p);
-        return NULL; 
-    }
+    if (!tok) return parent;
 
-    const char *name = path_get_token_text(tok);
-    struct pugfs_dir_entry *entry = _pugfs_load_dir_entry_from_dir(fs, name, &fs->root);
+    struct pugfs_dir_entry *entry = NULL;
+    struct pugfs_dir_entry search_entry;
+    memset(&search_entry, 0, sizeof(struct pugfs_dir_entry));
+
+    while (tok) {
+        strncpy((char*)search_entry.name, path_get_token_text(tok), PUGFS_FILENAME_BYTES);
+        entry = _pugfs_find_dir_entry_in_dir(
+            fs, 
+            &search_entry, 
+            _pugfs_compare_dir_entries_by_name,
+            parent
+        );
+        if (!entry) break;
+        parent = entry;
+        tok = path_get_next_token(tok);
+    }
     
     path_destroy(p);
     return entry;
-}
-
-int pugfs_touch(PUGFS *fs, const char *path) {
-    // just testing here, will remove
-    struct pugfs_dir_entry *entry = _pugfs_load_dir_entry_absolute(fs, path);
-    if (!entry) return -1;
-    printf("File name: %s\n", entry->name);
-    printf("Type: %x\n", entry->type);
-    entry = _pugfs_load_dir_entry_absolute(fs, "0:/world.txt");
-    if (!entry) return -1;
-    printf("File name: %s\n", entry->name);
-    printf("Type: %x\n", entry->type);
-    return 0;
-}
-
-int pugfs_delete(PUGFS *fs, const char *path) {
-
-}
-
-int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
-
-}
-
-int pugfs_mkdir(PUGFS *fs, const char *path) {
-
-}
-
-int pugfs_rmdir(PUGFS *fs, const char *path) {
-
-}
-
-int pugfs_lsdir(PUGFS *fs, const char *path, char **list_out, size_t start_index, size_t max_entries) {
-
-}
-
-int pugfs_copy(PUGFS *fs, const char *src, const char *dst) {
-
-}
-
-int pugfs_move(PUGFS *fs, const char *src, const char *dst) {
-
-}
-
-pugfs_fd pugfs_fopen(PUGFS *fs, const char *path, pugfs_file_mode_t mode) {
-
-}
-
-int pugfs_fclose(PUGFS *fs, pugfs_fd fd) {
-
-}
-
-int pugfs_fstat(PUGFS *fs, pugfs_fd fd, struct pugfs_filestat *stat) {
-
-}
-
-int pugfs_fseek(PUGFS *fs, pugfs_fd fd, int offset, pugfs_seek_mode_t whence) {
-
-}
-
-size_t pugfs_fread(PUGFS *fs, void *dst, size_t size, size_t nmemb, pugfs_fd fd) {
-
-}
-
-size_t pugfs_fwrite(PUGFS *fs, const void *src, size_t size, size_t nmemb, pugfs_fd fd) {
-
 }
