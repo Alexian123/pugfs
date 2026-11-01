@@ -117,7 +117,7 @@ int disk_img_stream_seek(DISK_IMG_STREAM *stream, uint32_t sector, uint32_t offs
     return 0;
 }
 
-static void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count) {
+void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count) {
     stream->offset += count;
     stream->sector += stream->offset / stream->img->sector_size;
     stream->offset %= stream->img->sector_size;

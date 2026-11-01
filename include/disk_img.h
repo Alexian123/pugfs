@@ -20,6 +20,9 @@ void disk_img_stream_destroy(DISK_IMG_STREAM *stream);
 
 int disk_img_stream_seek(DISK_IMG_STREAM *stream, uint32_t sector, uint32_t offset);
 
+// Advances the stream by count bytes, potentially moving to the next sector
+void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count);
+
 int disk_img_stream_read_bytes(DISK_IMG_STREAM *stream, int count, void *dst);
 int disk_img_stream_write_bytes(DISK_IMG_STREAM *stream, int count, const void *src);
 

@@ -20,7 +20,20 @@ int main(void) {
     fs = pugfs_load(img);
     if (fs) {
         printf("Pugfs detected on disk image: %s\n", IMAGE_PATH);
-        pugfs_touch(fs, "0:/hello.txt");
+        int res = 0;
+        res = pugfs_touch(fs, "0:/hello.txt");
+        printf("touch result: %d\n", res);
+        res = pugfs_touch(fs, "0:/other.sys");
+        printf("touch result: %d\n", res);
+        res = pugfs_touch(fs, "0:/program.exe");
+        printf("touch result: %d\n", res);
+
+        res = pugfs_touch(fs, "0:/hello.txt");
+        printf("touch result: %d\n", res);
+        res = pugfs_touch(fs, "0:/other.sys");
+        printf("touch result: %d\n", res);
+        res = pugfs_touch(fs, "0:/program.exe");
+        printf("touch result: %d\n", res);
     } else {
         printf("No fs\n");
     }

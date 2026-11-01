@@ -101,17 +101,16 @@ void path_destroy(PATH *p)
     free(p);
 }
 
-char* path_to_string(PATH *p) {
-    if (!p) return NULL;
+int path_to_string(PATH *p, char *out) {
+    if (!p || !out) return -1;
 
-    char *str = malloc(PATH_MAX_LEN);
-    memset(str, 0, PATH_MAX_LEN);
-    if (!str) return NULL;
+    memset(out, 0, PATH_MAX_LEN);
+    if (!out) return -1;
 
     // "0:/"
-    str[0] = DIGIT_NUM_TO_CHAR(p->drive_no);
-    str[1] = PATH_ROOT_DELIMITER;
-    str[2] = PATH_TOKEN_DELIMITER;
+    out[0] = DIGIT_NUM_TO_CHAR(p->drive_no);
+    out[1] = PATH_ROOT_DELIMITER;
+    out[2] = PATH_TOKEN_DELIMITER;
 
     size_t pos = 3;
     struct path_token *tok = p->first;
@@ -121,11 +120,10 @@ char* path_to_string(PATH *p) {
 
         // reserve one byte for '\0'
         if (len >= PATH_MAX_TOKEN_LEN || pos + len >= PATH_MAX_LEN) {
-            free(str);
-            return NULL;
+            return -1;
         }
 
-        memcpy(str + pos, tok->text, len);
+        memcpy(out + pos, tok->text, len);
         pos += len;
 
         tok = tok->next;
@@ -133,15 +131,14 @@ char* path_to_string(PATH *p) {
         // add separator between tokens
         if (tok) {
             if (pos + 1 >= PATH_MAX_LEN) {
-                free(str);
-                return NULL;
+                return -1;
             }
-            str[pos++] = PATH_TOKEN_DELIMITER;
+            out[pos++] = PATH_TOKEN_DELIMITER;
         }
     }
 
-    str[pos] = '\0';
-    return str;
+    out[pos] = '\0';
+    return 0;
 }
 
 int path_get_drive_number(PATH *p) {
@@ -154,6 +151,36 @@ PATH_TOKEN* path_get_first_token(PATH *p) {
 
 PATH_TOKEN* path_get_next_token(PATH_TOKEN *pt) {
     return pt->next;
+}
+
+int path_pop_last_token(PATH *p, char *out_token_text) {
+    if (!p || !out_token_text) return -1;
+
+    struct path_token *prev = NULL;
+    struct path_token *curr = p->first;
+
+    // traverse to the last token
+    while (curr && curr->next) {
+        prev = curr;
+        curr = curr->next;
+    }
+
+    if (curr) {
+        // copy the text of the last token
+        strncpy(out_token_text, curr->text, PATH_MAX_TOKEN_LEN);
+        out_token_text[PATH_MAX_TOKEN_LEN - 1] = '\0'; // ensure null termination
+
+        // remove the last token from the list
+        if (prev) {
+            prev->next = NULL;
+        } else {
+            p->first = NULL; // list is now empty
+        }
+        free(curr);
+    } else {
+        out_token_text[0] = '\0'; // no token to pop
+    }
+    return 0;
 }
 
 const char* path_get_token_text(PATH_TOKEN *pt) {

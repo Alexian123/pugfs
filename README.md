@@ -49,6 +49,7 @@ struct pugfs_header
 
 - Contain directory entry items
 - Entry names must be padded with null bytes
+- Entries must never cross cluster boundaries
 
 ```c
 struct pugfs_dir_entry
