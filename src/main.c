@@ -28,12 +28,31 @@ int main(void) {
         res = pugfs_touch(fs, "0:/program.exe");
         printf("touch result: %d\n", res);
 
-        res = pugfs_touch(fs, "0:/hello.txt");
+        res = pugfs_touch(fs, "0:/newdir/hello.txt");
         printf("touch result: %d\n", res);
-        res = pugfs_touch(fs, "0:/other.sys");
+
+        res = pugfs_mkdir(fs, "0:/newdir/second");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir/second/hello.txt");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir");
+        printf("mkdir result: %d\n", res);
+        res = pugfs_mkdir(fs, "0:/otherdir");
+        printf("mkdir result: %d\n", res);
+        res = pugfs_mkdir(fs, "0:/programdir");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir/second");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir/second/hello.txt");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_touch(fs, "0:/newdir/hello.txt");
         printf("touch result: %d\n", res);
-        res = pugfs_touch(fs, "0:/program.exe");
-        printf("touch result: %d\n", res);
+        
     } else {
         printf("No fs\n");
     }

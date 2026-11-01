@@ -124,6 +124,9 @@ static int _pugfs_write_dir_entry_to_data_cluster(
 );
 static int _pugfs_write_dir_entry_absolute(PUGFS *fs, const char *path, struct pugfs_dir_entry *entry);
 
+// wrapper functions for pugfs operations
+static int _pugfs_write_new_dir_entry(PUGFS *fs, const char *path, uint8_t type);
+
 PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
     if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
 
@@ -242,27 +245,7 @@ int pugfs_touch(PUGFS *fs, const char *path) {
         return -2;
     }
 
-    PATH *p = path_parse(path, NULL);
-    if (!p) return -1;
-
-    char new_entry_name[PATH_MAX_TOKEN_LEN + 1] = {0};
-    path_pop_last_token(p, new_entry_name); // remove the last token to get the parent directory path
-
-    char parent_dir_path[PATH_MAX_LEN + 1] = {0};
-    path_to_string(p, parent_dir_path);
-    path_destroy(p);
-
-    struct pugfs_dir_entry new_entry;
-    memset(&new_entry, 0, sizeof(struct pugfs_dir_entry));
-    new_entry.type = PUGFS_DIR_ENTRY_TYPE_FILE;
-    new_entry.size = fs->header.sectors_per_cluster * fs->header.sector_size; // initial size is one cluster
-    new_entry.creation_ts = 0; // TODO: set to current timestamp
-    new_entry.last_access_ts = 0; // TODO: set to current timestamp
-    new_entry.starting_cluster_index = 0; // will be allocated later
-    new_entry.attributes = 0; // no special attributes
-    strncpy((char*)new_entry.name, new_entry_name, PUGFS_FILENAME_BYTES - 1);
-
-    return _pugfs_write_dir_entry_absolute(fs, parent_dir_path, &new_entry);
+    return _pugfs_write_new_dir_entry(fs, path, PUGFS_DIR_ENTRY_TYPE_FILE);
 }
 
 int pugfs_delete(PUGFS *fs, const char *path) {
@@ -274,7 +257,16 @@ int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
 }
 
 int pugfs_mkdir(PUGFS *fs, const char *path) {
-    return -1;
+    if (!fs || !path) return -1;
+
+    struct pugfs_dir_entry entry;
+    int res = _pugfs_find_dir_entry_absolute(fs, path, &entry);
+    if (res == 0) {
+        // dir already exists
+        return -2;
+    }
+
+    return _pugfs_write_new_dir_entry(fs, path, PUGFS_DIR_ENTRY_TYPE_DIR);
 }
 
 int pugfs_rmdir(PUGFS *fs, const char *path) {
@@ -792,4 +784,28 @@ static int _pugfs_write_dir_entry_absolute(PUGFS *fs, const char *parent_dir_pat
     }
 
     return 0;
+}
+
+static int _pugfs_write_new_dir_entry(PUGFS *fs, const char *path, uint8_t type) {
+    PATH *p = path_parse(path, NULL);
+    if (!p) return -1;
+
+    char new_entry_name[PATH_MAX_TOKEN_LEN + 1] = {0};
+    path_pop_last_token(p, new_entry_name); // remove the last token to get the parent directory path
+
+    char parent_dir_path[PATH_MAX_LEN + 1] = {0};
+    path_to_string(p, parent_dir_path);
+    path_destroy(p);
+
+    struct pugfs_dir_entry new_entry;
+    memset(&new_entry, 0, sizeof(struct pugfs_dir_entry));
+    new_entry.type = type;
+    new_entry.size = fs->header.sectors_per_cluster * fs->header.sector_size; // initial size is one cluster
+    new_entry.creation_ts = 0; // TODO: set to current timestamp
+    new_entry.last_access_ts = 0; // TODO: set to current timestamp
+    new_entry.starting_cluster_index = 0; // will be allocated later
+    new_entry.attributes = 0; // no special attributes
+    strncpy((char*)new_entry.name, new_entry_name, PUGFS_FILENAME_BYTES - 1);
+
+    return _pugfs_write_dir_entry_absolute(fs, parent_dir_path, &new_entry);
 }
