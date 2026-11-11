@@ -308,7 +308,74 @@ int pugfs_delete(PUGFS *fs, const char *path) {
 }
 
 int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
-    return -1;
+    if (!fs || !path) return -1;
+
+    struct pugfs_dir_entry entry;
+    uint32_t index_in_cluster = 0, cluster_index = 0;
+    int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, &index_in_cluster, &cluster_index);
+    if (res != 0) {
+        // file doesnt exist
+        return -1;
+    }
+
+    // ensure entry is valid file
+    if (entry.type != PUGFS_DIR_ENTRY_TYPE_FILE) {
+        return -2; // not a file
+    }
+
+    // ensure file size is larger than new size
+    if (entry.size <= new_size) {
+        return 1; // nothing to do
+    }
+
+    uint32_t bytes_per_cluster = fs->header.sector_size * fs->header.sectors_per_cluster;
+    if (entry.size <= bytes_per_cluster) {
+        return 1; // nothing to do, min file size is 1 cluster
+    }
+    uint32_t file_clusters = entry.size / bytes_per_cluster;
+    if (entry.size % bytes_per_cluster != 0) {  // round up to next cluster
+        ++file_clusters;
+    }
+
+    uint32_t new_file_clusters = new_size / bytes_per_cluster;
+    if (new_size % bytes_per_cluster != 0) {  // round up to next cluster
+        ++new_file_clusters;
+    }
+
+    uint32_t cluster = entry.starting_cluster_index;
+    for (uint32_t i = 1; i < new_file_clusters; ++i) {
+        cluster = _pugfs_read_ftable_entry(fs, cluster);
+        if (cluster == PUGFS_FTABLE_ENTRY_EOC || cluster == PUGFS_FTABLE_ENTRY_INVALID) {
+            return -3; 
+        }
+    }
+
+    uint32_t next_cluster = _pugfs_read_ftable_entry(fs, cluster);
+
+    if (next_cluster == PUGFS_FTABLE_ENTRY_INVALID ||
+        next_cluster == PUGFS_FTABLE_ENTRY_FREE ||
+        next_cluster == PUGFS_FTABLE_ENTRY_RESERVED ||
+        next_cluster == PUGFS_FTABLE_ENTRY_BAD) {
+        return -3;
+    }
+
+    // update entry size and write it back
+    entry.size = new_size;
+    res = _pugfs_write_dir_entry_to_data_cluster(fs, cluster_index, index_in_cluster, &entry);
+    if (res != 0) {
+        return -6; // failed to update entry
+    }
+
+    res = _pugfs_write_ftable_entry(fs, cluster, PUGFS_FTABLE_ENTRY_EOC);
+    if (res != 0) {
+        return -4; // failed to update ftable entry
+    }
+    res = _pugfs_free_cluster_chain(fs, next_cluster);
+    if (res != 0) {
+        return -5; // failed to free cluster chain
+    }
+
+    return 0;
 }
 
 int pugfs_mkdir(PUGFS *fs, const char *path) {
