@@ -5,6 +5,8 @@
 
 #include <stdlib.h>
 
+#define PUGFS_FILENAME_BYTES 32     // must be padded with '\0'
+
 typedef enum
 {
     PUGFS_FILE_MODE_READ,
@@ -47,8 +49,8 @@ int pugfs_touch(PUGFS *fs, const char *path);
 int pugfs_delete(PUGFS *fs, const char *path);
 int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size);
 int pugfs_mkdir(PUGFS *fs, const char *path);
-int pugfs_rmdir(PUGFS *fs, const char *path);
-int pugfs_lsdir(PUGFS *fs, const char *path, char **list_out, size_t start_index, size_t max_entries);
+int pugfs_rmdir(PUGFS *fs, const char *path); // will also remove all files in it
+int pugfs_lsdir(PUGFS *fs, const char *path, char *list_out, int max_entries);
 int pugfs_copy(PUGFS *fs, const char *src, const char *dst);
 int pugfs_move(PUGFS *fs, const char *src, const char *dst);
 
