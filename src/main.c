@@ -112,6 +112,27 @@ int main(void) {
         for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
             printf("\t%s\n", list + i);
         }
+
+        res = pugfs_delete(fs, "0:/hello.txt");
+        printf("delete result: %d\n", res);
+
+        res = pugfs_lsdir(fs, "0:/", list, MAX_ENTRIES);
+        printf("Found %d entries in root. Listing:\n", res);
+        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
+            printf("\t%s\n", list + i);
+        }
+
+        res = pugfs_rmdir(fs, "0:/newdir");
+        printf("rmdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_lsdir(fs, "0:/newdir", list, MAX_ENTRIES);
+        printf("Found %d entries in root/newdir. Listing:\n", res);
+        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
+            printf("\t%s\n", list + i);
+        }
         
     } else {
         printf("No fs\n");

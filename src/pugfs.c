@@ -673,6 +673,7 @@ static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster) {
 
 static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2) {
     if (!e1 || !e2) return -1;
+    if (e1->type == PUGFS_DIR_ENTRY_TYPE_FREE) return -1;
     return strncmp((const char*)e1->name, (const char*)e2->name, PUGFS_FILENAME_BYTES);
 }
 
