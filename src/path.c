@@ -141,6 +141,48 @@ int path_to_string(PATH *p, char *out) {
     return 0;
 }
 
+int path_equals(PATH *p1, PATH *p2) {
+    if (!p1 || !p2) return -1;
+
+    if (p1->drive_no != p2->drive_no) return 0;
+
+    PATH_TOKEN *t1 = p1->first;
+    PATH_TOKEN *t2 = p2->first;
+
+    while (t1 && t2) {
+        if (strcmp(t1->text, t2->text) != 0)
+            return 0;
+        t1 = t1->next;
+        t2 = t2->next;
+    }
+
+    // both paths must have the same number of tokens
+    return t1 == NULL && t2 == NULL;
+}
+
+int path_is_child_of(PATH *p1, PATH *p2) {
+    if (!p1 || !p2) return -1;
+
+    if (p1->drive_no != p2->drive_no) return 0;
+
+    PATH_TOKEN *t1 = p1->first;
+    PATH_TOKEN *t2 = p2->first;
+
+    // p1 cannot be a child if it has fewer components
+    while (t2) {
+        if (!t1) return 0;
+
+        if (strcmp(t1->text, t2->text) != 0)
+            return 0;
+
+        t1 = t1->next;
+        t2 = t2->next;
+    }
+
+    // p1 must have at least one additional component
+    return t1 != NULL;
+}
+
 int path_get_drive_number(PATH *p) {
     return p->drive_no;
 }

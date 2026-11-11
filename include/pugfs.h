@@ -51,8 +51,8 @@ int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size);
 int pugfs_mkdir(PUGFS *fs, const char *path);
 int pugfs_rmdir(PUGFS *fs, const char *path); // will also remove all files in it
 int pugfs_lsdir(PUGFS *fs, const char *path, char *list_out, int max_entries);
-int pugfs_copy(PUGFS *fs, const char *src, const char *dst);
-int pugfs_move(PUGFS *fs, const char *src, const char *dst);
+int pugfs_copy(PUGFS *fs, const char *src, const char *dst, int overwrite);
+int pugfs_move(PUGFS *fs, const char *src, const char *dst, int overwrite);
 
 pugfs_fd pugfs_fopen(PUGFS *fs, const char *path, pugfs_file_mode_t mode);
 int pugfs_fclose(PUGFS *fs, pugfs_fd fd);
