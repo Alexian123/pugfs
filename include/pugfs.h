@@ -41,8 +41,8 @@ struct pugfs_filestat
     uint8_t attributes;
 };
 
-PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
-PUGFS* pugfs_load(DISK_IMG *img);
+void pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
+PUGFS* pugfs_mount(DISK_IMG *img);
 void pugfs_destroy(PUGFS *fs);
 
 int pugfs_touch(PUGFS *fs, const char *path);

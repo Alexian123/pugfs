@@ -25,7 +25,7 @@ $(BUILD_DIR)/obj/%.o: %.c $(HEADERS_C)
 	@echo "--> Compiled: $<"
 
 run: all
-	./$(BIN)
+	./$(BIN) 512 ./test.img
 
 clean:
 	rm -rf $(BUILD_DIR)

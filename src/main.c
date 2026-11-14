@@ -1,167 +1,80 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "pugfs.h"
+#include "shell.h"
 
-#define IMAGE_PATH "./test.img"
-#define SECTOR_SIZE 512
+#define MIN_SECTOR_SIZE 512
+#define MAX_SECTOR_SIZE 4096
 
-#define MAX_ENTRIES 100
+#define DEFAULT_RESERVED_SECTORS 100
+#define DEFAULT_SECTORS_PER_CLUSTER 1
 
-char list[MAX_ENTRIES * PUGFS_FILENAME_BYTES];
+uint32_t sector_size = 0;
+const char *image_path = NULL;
 
-int main(void) {
-    memset(list, 0, sizeof(list));
-
-    DISK_IMG *img = disk_img_open(IMAGE_PATH, SECTOR_SIZE);
-    if (!img) {
-        fprintf(stderr, "Failed to open image: %s\n", IMAGE_PATH);
+int main(int argc, char **argv) {
+    
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <sector_size> <path_to_image>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    PUGFS *fs = pugfs_format(img, 2, 1);
-    pugfs_destroy(fs);
+    sscanf(argv[1], "%u", &sector_size);
+    image_path = argv[2];
 
-    fs = pugfs_load(img);
-    if (fs) {
-        printf("Pugfs detected on disk image: %s\n", IMAGE_PATH);
-        int res = 0;
-
-        res = pugfs_delete(fs, "0:/hello.txt");
-        printf("delete result: %d\n", res);
-
-        res = pugfs_touch(fs, "0:/hello.txt");
-        printf("touch result: %d\n", res);
-
-        res = pugfs_delete(fs, "0:/hello.txt");
-        printf("delete result: %d\n", res);
-
-        res = pugfs_touch(fs, "0:/other.sys");
-        printf("touch result: %d\n", res);
-        res = pugfs_touch(fs, "0:/program.exe");
-        printf("touch result: %d\n", res);
-
-        res = pugfs_touch(fs, "0:/hello.txt");
-        printf("touch result: %d\n", res);
-        res = pugfs_touch(fs, "0:/other.sys");
-        printf("touch result: %d\n", res);
-        res = pugfs_touch(fs, "0:/program.exe");
-        printf("touch result: %d\n", res);
-
-        res = pugfs_touch(fs, "0:/newdir/hello.txt");
-        printf("touch result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second/hello.txt");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir");
-        printf("mkdir result: %d\n", res);
-        res = pugfs_mkdir(fs, "0:/otherdir");
-        printf("mkdir result: %d\n", res);
-        res = pugfs_mkdir(fs, "0:/programdir");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second/hello.txt");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_touch(fs, "0:/newdir/second/hello.txt/myfile.c");
-        printf("touch result: %d\n", res);
-
-        res = pugfs_lsdir(fs, "0:/", list, MAX_ENTRIES);
-        printf("Found %d entries in root. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/newdir", list, MAX_ENTRIES);
-        printf("Found %d entries in root/newdir. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/otherdir", list, MAX_ENTRIES);
-        printf("Found %d entries in root/otherdir. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/programdir", list, MAX_ENTRIES);
-        printf("Found %d entries in root/programdir. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/newdir/second", list, MAX_ENTRIES);
-        printf("Found %d entries in root/newdir/second. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/newdir/second/hello.txt", list, MAX_ENTRIES);
-        printf("Found %d entries in root/newdir/second/hello.txt. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_delete(fs, "0:/hello.txt");
-        printf("delete result: %d\n", res);
-
-        res = pugfs_lsdir(fs, "0:/", list, MAX_ENTRIES);
-        printf("Found %d entries in root. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_rmdir(fs, "0:/newdir");
-        printf("rmdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_rmdir(fs, "0:/otherdir");
-        printf("rmdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/otherdir");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_mkdir(fs, "0:/newdir/second/otherdir");
-        printf("mkdir result: %d\n", res);
-
-        res = pugfs_move(fs, "0:/otherdir", "0:/newdir/second/otherdir", 1);
-        printf("move result: %d\n", res);
-
-        res = pugfs_lsdir(fs, "0:/", list, MAX_ENTRIES);
-        printf("Found %d entries in root. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/newdir/second", list, MAX_ENTRIES);
-        printf("Found %d entries in root/newdir/second. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-
-        res = pugfs_lsdir(fs, "0:/newdir", list, MAX_ENTRIES);
-        printf("Found %d entries in root/newdir. Listing:\n", res);
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list + i);
-        }
-        
-    } else {
-        printf("No fs\n");
+    if (sector_size < MIN_SECTOR_SIZE || sector_size > MAX_SECTOR_SIZE || (sector_size % 512) != 0) {
+        fprintf(stderr, "Invalid sector size: %u\n", sector_size);
+        exit(EXIT_FAILURE);
     }
 
-    disk_img_close(img);
+    DISK_IMG *img = disk_img_open(image_path, sector_size);
+    if (!img) {
+        fprintf(stderr, "Failed to open image: %s\n", image_path);
+        exit(EXIT_FAILURE);
+    }
+
+    PUGFS *fs = pugfs_mount(img);
+    if (fs) {
+        printf("Successfully mounted pugfs image: %s\n", image_path);
+    } else {
+        printf("Failed to mount image: %s\nPossibly missing or corrupt file system\n", image_path);
+        printf("Do you want to format the image? WARNING: all data will be lost!\n");
+        printf("(y/n): ");
+
+        int choice = fgetc(stdin);
+        int c; 
+        while ((c = getchar()) != '\n' && c != EOF);
+        choice = tolower(choice);
+        switch (choice)
+        {
+        case 'y':
+            printf("Formatting image with pugfs...\nReserved sectors: %d\nCluster size: %d\n", DEFAULT_RESERVED_SECTORS, DEFAULT_SECTORS_PER_CLUSTER);
+            pugfs_format(img, DEFAULT_RESERVED_SECTORS, DEFAULT_SECTORS_PER_CLUSTER);
+            break;
+
+        case 'n':
+            printf("Exiting...\n");
+            exit(EXIT_SUCCESS);
+            break;
+        
+        default:
+            fprintf(stderr, "Invalid option: %c\nExiting...\n", choice);
+            exit(EXIT_FAILURE);
+            break;
+        }
+
+        fs = pugfs_mount(img);
+        if (!fs) {
+            fprintf(stderr, "Failed to format image: %s\nExiting...\n", image_path);
+            exit(EXIT_FAILURE);
+        }
+        printf("Image successfully formatted and mounted!\n");
+    }
+
+    shell_start(fs, img);
+
     return 0;
 }

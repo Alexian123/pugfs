@@ -3,7 +3,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <limits.h>
 
 #define PUGFS_MAGIC_NUMBER  0xBEEFFEED
 #define PUGFS_VERSION       1
@@ -165,7 +164,7 @@ static int _pugfs_create_new_dir_entry(
 // utility functions
 static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir); // 1 if empty, 0 if not, <0 on error
 
-PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
+void pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
     if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return NULL;
 
     int disk_sector_size = disk_img_get_sector_size(img);
@@ -234,10 +233,10 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
     disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
 
-    return fs;
+    pugfs_destroy(fs);
 }
 
-PUGFS* pugfs_load(DISK_IMG *img) {
+PUGFS* pugfs_mount(DISK_IMG *img) {
     if (!img) return NULL;
 
     PUGFS *fs = _pugfs_create(img);
@@ -285,7 +284,7 @@ int pugfs_touch(PUGFS *fs, const char *path) {
         res = _pugfs_write_dir_entry_to_data_cluster(fs, cluster_index, index_in_cluster, &entry);
         if (res < 0) return -2;
 
-        return 1;
+        return -10;
     }
 
     return _pugfs_create_new_dir_entry(fs, path, PUGFS_DIR_ENTRY_TYPE_FILE, NULL, NULL, NULL);
@@ -299,7 +298,7 @@ int pugfs_delete(PUGFS *fs, const char *path) {
     int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, &index_in_cluster, &cluster_index);
     if (res != 0) {
         // file doesnt exist, nothing to do
-        return 1;
+        return -10;
     }
 
     // ensure entry is valid file
@@ -346,7 +345,7 @@ int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size) {
 
     uint32_t bytes_per_cluster = fs->header.sector_size * fs->header.sectors_per_cluster;
     if (entry.size <= bytes_per_cluster) {
-        return 1; // nothing to do, min file size is 1 cluster
+        return -10; // nothing to do, min file size is 1 cluster
     }
     uint32_t file_clusters = entry.size / bytes_per_cluster;
     if (entry.size % bytes_per_cluster != 0) {  // round up to next cluster
@@ -402,7 +401,7 @@ int pugfs_mkdir(PUGFS *fs, const char *path) {
     int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, &index_in_cluster, &cluster_index);
     if (res == 0) {
         // dir already exists, no touching!
-        return 1;
+        return -10;
     }
 
     return _pugfs_create_new_dir_entry(fs, path, PUGFS_DIR_ENTRY_TYPE_DIR, NULL, NULL, NULL);
@@ -426,7 +425,7 @@ int pugfs_rmdir(PUGFS *fs, const char *path) {
     int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, &index_in_cluster, &cluster_index);
     if (res != 0) {
         // dir doesnt exist, nothing to do
-        return 1;
+        return -10;
     }
 
     // ensure entry is valid dir
@@ -470,6 +469,7 @@ int pugfs_lsdir(PUGFS *fs, const char *path, char *list_out, int max_entries) {
         return -2; // not a dir
     }
 
+    memset(list_out, 0, max_entries * PUGFS_FILENAME_BYTES);
     struct pugfs_dir_entry dummy;
     return _pugfs_list_dir_entries_in_dir(fs, &dummy, _pugfs_compare_dir_entries_file_or_dir, &entry, list_out, max_entries);
 }
