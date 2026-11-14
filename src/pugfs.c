@@ -223,7 +223,7 @@ PUGFS* pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_p
     disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
 
     memset(fs->buf, 0, disk_sector_size);
-    for (int i = 1; i < ftable_sectors; ++i) {
+    for (uint32_t i = 1; i < ftable_sectors; ++i) {
         disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
     }
     
@@ -508,18 +508,25 @@ int pugfs_move(PUGFS *fs, const char *src, const char *dst, int overwrite) {
     if (!fs || !src || !dst) return -1;
 
     PATH *psrc = path_parse(src, NULL);
-    if (!psrc) return -1;
-
     PATH *pdst = path_parse(dst, NULL);
-    if (!pdst) return -1;
+
+    if (!psrc || !pdst) {
+        path_destroy(psrc);
+        path_destroy(pdst);
+        return -1;
+    }
 
     // check if paths are equal
     if (path_equals(psrc, pdst) == 1) {
+        path_destroy(psrc);
+        path_destroy(pdst);
         return 0;
     }
 
     // check if dst is child of src
     if (path_is_child_of(pdst, psrc) == 1) {
+        path_destroy(psrc);
+        path_destroy(pdst);
         return -9;
     }
 
@@ -555,15 +562,15 @@ int pugfs_move(PUGFS *fs, const char *src, const char *dst, int overwrite) {
             }
         }
     } else {
-        // create new entry at dest
-        res = _pugfs_create_new_dir_entry(fs, dst, src_entry.type, &dst_entry, &dst_index_in_cluster, &dst_cluster_index);
+        // create new free entry at dest (no cluster will be allocated for data)
+        res = _pugfs_create_new_dir_entry(fs, dst, PUGFS_DIR_ENTRY_TYPE_FREE, &dst_entry, &dst_index_in_cluster, &dst_cluster_index);
         if (res != 0) {
             return -3; // failed to create new entry
         }
     }
     // by this point, dst_entry and indices are valid
 
-    // save cluster chain start of dest
+    // save cluster chain start of dest (will be 0 if its a new entry)
     uint32_t old_dest_chain_start = dst_entry.starting_cluster_index;
 
     // copy the src entry to dst entry
@@ -575,18 +582,20 @@ int pugfs_move(PUGFS *fs, const char *src, const char *dst, int overwrite) {
     if (res != 0) {
         return -4; // failed to write dst entry
     }
-
-    // free old cluster chain of dest (if new, it will have 1 cluster)
-    res = _pugfs_free_cluster_chain(fs, old_dest_chain_start);
-    if (res != 0) {
-        return -6;
-    }
     
     // mark the src entry as free and write it back
     src_entry.type = PUGFS_DIR_ENTRY_TYPE_FREE;
     res = _pugfs_write_dir_entry_to_data_cluster(fs, src_cluster_index, src_index_in_cluster, &src_entry);
     if (res != 0) {
         return -5; // failed to write src entry
+    }
+
+    // free old cluster chain of dest if not newly created
+    if (old_dest_chain_start != 0) {
+        res = _pugfs_free_cluster_chain(fs, old_dest_chain_start);
+        if (res != 0) {
+            return -6;
+        }
     }
     
     return 0;
@@ -721,7 +730,7 @@ static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img) {
         return -2;
 
     // verify checksum
-    int checksum = _pugfs_header_checksum(header);
+    uint32_t checksum = _pugfs_header_checksum(header);
     if (checksum != header->checksum) return -2;
 
     // TODO more checks
@@ -1254,11 +1263,13 @@ static int _pugfs_write_new_dir_entry_to_dir(
     }
     // by this point, the free and eod indices should be set correctly
 
-    // allocate a cluster for the new dir entry
+    // allocate a cluster for the new dir entry, unless its a free entry
     uint32_t new_entry_cluster_index = 0;
-    res = _pugfs_allocate_cluster(fs, &new_entry_cluster_index);
-    if (res != 0) return res;
-    entry->starting_cluster_index = new_entry_cluster_index;
+    if (entry->type != PUGFS_DIR_ENTRY_TYPE_FREE) {
+        res = _pugfs_allocate_cluster(fs, &new_entry_cluster_index);
+        if (res != 0) return res;
+        entry->starting_cluster_index = new_entry_cluster_index;
+    }
 
     // write the new entry to the free entry location
     res = _pugfs_write_dir_entry_to_data_cluster(fs, free_cluster_index, free_index_in_cluster, entry);
@@ -1335,6 +1346,8 @@ static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir) {
     if (dir->type != PUGFS_DIR_ENTRY_TYPE_DIR) return -1;
 
     struct pugfs_dir_entry search_entry, found_entry;
+    memset(&search_entry, 0, sizeof(search_entry));
+    memset(&found_entry, 0, sizeof(found_entry));
     uint32_t cluster_index, index_in_cluster;
     int res = _pugfs_find_dir_entry_in_dir(
         fs,

@@ -102,13 +102,13 @@ int main(void) {
         }
 
         res = pugfs_lsdir(fs, "0:/newdir/second", list, MAX_ENTRIES);
-        printf("Found %d entries in root/second. Listing:\n", res);
+        printf("Found %d entries in root/newdir/second. Listing:\n", res);
         for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
             printf("\t%s\n", list + i);
         }
 
         res = pugfs_lsdir(fs, "0:/newdir/second/hello.txt", list, MAX_ENTRIES);
-        printf("Found %d entries in root/second/hello.txt. Listing:\n", res);
+        printf("Found %d entries in root/newdir/second/hello.txt. Listing:\n", res);
         for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
             printf("\t%s\n", list + i);
         }
@@ -127,6 +127,30 @@ int main(void) {
 
         res = pugfs_mkdir(fs, "0:/newdir");
         printf("mkdir result: %d\n", res);
+
+        res = pugfs_rmdir(fs, "0:/otherdir");
+        printf("rmdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/otherdir");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_mkdir(fs, "0:/newdir/second/otherdir");
+        printf("mkdir result: %d\n", res);
+
+        res = pugfs_move(fs, "0:/otherdir", "0:/newdir/second/otherdir", 1);
+        printf("move result: %d\n", res);
+
+        res = pugfs_lsdir(fs, "0:/", list, MAX_ENTRIES);
+        printf("Found %d entries in root. Listing:\n", res);
+        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
+            printf("\t%s\n", list + i);
+        }
+
+        res = pugfs_lsdir(fs, "0:/newdir/second", list, MAX_ENTRIES);
+        printf("Found %d entries in root/newdir/second. Listing:\n", res);
+        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
+            printf("\t%s\n", list + i);
+        }
 
         res = pugfs_lsdir(fs, "0:/newdir", list, MAX_ENTRIES);
         printf("Found %d entries in root/newdir. Listing:\n", res);
