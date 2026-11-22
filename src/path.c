@@ -6,43 +6,44 @@
 #define DIGIT_CHAR_TO_NUM(c)    ((c) - '0')
 #define DIGIT_NUM_TO_CHAR(n)    ((n) + '0')
 
-struct path_root
-{
-    int drive_no;
-    struct path_token *first;
-};
-
 struct path_token
 {
     char text[PATH_MAX_TOKEN_LEN];
-    struct path_token *next;
+    int index;
 };
 
-bool path_is_valid(const char *path) {
-    if (!path) return false;
+struct path
+{
+    int drive_no;
+    struct path_token tokens[PATH_MAX_TOKENS];
+    int length;
+};
+
+int path_is_valid(const char *path) {
+    if (!path) return 0;
 
     size_t len = strnlen(path, PATH_MAX_LEN);
-    if (len >= PATH_MAX_LEN) return false;
+    if (len >= PATH_MAX_LEN) return 0;
 
-    return len >= 3 && isdigit(path[0]) && path[1] == PATH_ROOT_DELIMITER && path[2] == PATH_TOKEN_DELIMITER;
+    return len >= 3 && isdigit((unsigned char)path[0]) && path[1] == PATH_ROOT_DELIMITER && path[2] == PATH_TOKEN_DELIMITER;
 }
 
 PATH* path_parse(const char *path, const char *crt_dir_path) {
     (void)crt_dir_path; // Relative paths not implemented yet.
+
     if (!path_is_valid(path)) return NULL;
 
     // extract drive number
     int drive = DIGIT_CHAR_TO_NUM(path[0]);
     path += 3; // Skip "0:/"
 
-    // create root node
-    PATH *root = malloc(sizeof(struct path_root));
-    if (!root) return NULL;
-    root->drive_no = drive;
-    root->first = NULL;
+    // allocate memory for max path
+    PATH *p = (PATH*)malloc(sizeof(struct path));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(*p));
+    p->drive_no = drive;
 
     // parse tokens
-    struct path_token *last = NULL;
     while (*path != '\0') {
         // skip repeated delimiters
         while (*path == PATH_TOKEN_DELIMITER) path++;
@@ -58,46 +59,33 @@ PATH* path_parse(const char *path, const char *crt_dir_path) {
 
         // check the length
         if (len >= PATH_MAX_TOKEN_LEN) {
-            path_destroy(root);
+            path_destroy(p);
             return NULL;
         }
 
-        // create token
-        struct path_token *token = malloc(sizeof(struct path_token));
-        memset(token, 0, sizeof(struct path_token));
-        if (!token) {
-            path_destroy(root);
+        // check number of tokens
+        if (p->length >= PATH_MAX_TOKENS) {
+            path_destroy(p);
             return NULL;
         }
 
         // copy token text and append null terminator
+        int curr_index = p->length;
+        struct path_token *token = &(p->tokens[curr_index]);
         memcpy(token->text, path, len);
         token->text[len] = '\0';
-        token->next = NULL;
+        token->index = curr_index;
 
-        // append to linked list if necessary
-        if (last) {
-            last->next = token;
-        } else {
-            root->first = token;
-        }
-
-        last = token;
+        ++(p->length);
         path += len;
     }
 
-    return root;
+    return p;
 }
 
 void path_destroy(PATH *p)
 {
     if (!p) return;
-    struct path_token *tok = p->first;
-    while (tok) {
-        struct path_token *next = tok->next;
-        free(tok);
-        tok = next;
-    }
     free(p);
 }
 
@@ -105,7 +93,6 @@ int path_to_string(PATH *p, char *out) {
     if (!p || !out) return -1;
 
     memset(out, 0, PATH_MAX_LEN);
-    if (!out) return -1;
 
     // "0:/"
     out[0] = DIGIT_NUM_TO_CHAR(p->drive_no);
@@ -113,9 +100,8 @@ int path_to_string(PATH *p, char *out) {
     out[2] = PATH_TOKEN_DELIMITER;
 
     size_t pos = 3;
-    struct path_token *tok = p->first;
-
-    while (tok) {
+    for (int i = 0; i < p->length; ++i) {
+        struct path_token *tok = &(p->tokens[i]);
         size_t len = strnlen(tok->text, PATH_MAX_TOKEN_LEN);
 
         // reserve one byte for '\0'
@@ -126,10 +112,8 @@ int path_to_string(PATH *p, char *out) {
         memcpy(out + pos, tok->text, len);
         pos += len;
 
-        tok = tok->next;
-
         // add separator between tokens
-        if (tok) {
+        if (i < p->length - 1) {
             if (pos + 1 >= PATH_MAX_LEN) {
                 return -1;
             }
@@ -144,20 +128,15 @@ int path_to_string(PATH *p, char *out) {
 int path_equals(PATH *p1, PATH *p2) {
     if (!p1 || !p2) return -1;
 
-    if (p1->drive_no != p2->drive_no) return 0;
+    if (p1->drive_no != p2->drive_no || p1->length != p2->length)
+        return 0;
 
-    PATH_TOKEN *t1 = p1->first;
-    PATH_TOKEN *t2 = p2->first;
-
-    while (t1 && t2) {
-        if (strcmp(t1->text, t2->text) != 0)
+    for (int i = 0; i < p1->length; ++i) {
+        if (strcmp(p1->tokens[i].text, p2->tokens[i].text) != 0)
             return 0;
-        t1 = t1->next;
-        t2 = t2->next;
     }
 
-    // both paths must have the same number of tokens
-    return t1 == NULL && t2 == NULL;
+    return 1;
 }
 
 int path_is_child_of(PATH *p1, PATH *p2) {
@@ -165,66 +144,80 @@ int path_is_child_of(PATH *p1, PATH *p2) {
 
     if (p1->drive_no != p2->drive_no) return 0;
 
-    PATH_TOKEN *t1 = p1->first;
-    PATH_TOKEN *t2 = p2->first;
+    // p1 cannot be a child of p2 if it has fewer or equal components
+    if (p1->length <= p2->length) return 0;
 
-    // p1 cannot be a child if it has fewer components
-    while (t2) {
-        if (!t1) return 0;
-
+    for (int i = 0; i < p2->length; ++i) {
+        PATH_TOKEN *t1 = &(p1->tokens[i]);
+        PATH_TOKEN *t2 = &(p2->tokens[i]);
         if (strcmp(t1->text, t2->text) != 0)
             return 0;
-
-        t1 = t1->next;
-        t2 = t2->next;
     }
 
-    // p1 must have at least one additional component
-    return t1 != NULL;
+    return 1;
+}
+
+PATH* path_get_parent_path(PATH *p) {
+    if (!p || p->length <= 0) return NULL;
+
+    PATH *parent = (PATH*)malloc(sizeof(*p));
+    if (!parent) return NULL;
+
+    memcpy(parent, p, sizeof(*p));
+    --(parent->length); 
+
+    return parent;
 }
 
 int path_get_drive_number(PATH *p) {
+    if (!p) return -1;
     return p->drive_no;
 }
 
+int path_get_number_of_tokens(PATH *p) {
+    if (!p) return -1;
+    return p->length;
+}
+
+PATH_TOKEN* path_get_token_at(PATH *p, int index) {
+    if (!p || index < 0 || index >= p->length)
+        return NULL;
+    return &(p->tokens[index]);
+}
+
 PATH_TOKEN* path_get_first_token(PATH *p) {
-    return p->first;
+    if (!p || p->length <= 0)
+        return NULL;
+    return &(p->tokens[0]);
 }
 
-PATH_TOKEN* path_get_next_token(PATH_TOKEN *pt) {
-    return pt->next;
+PATH_TOKEN* path_get_last_token(PATH *p) {
+    if (!p || p->length <= 0)
+        return NULL;
+    return &(p->tokens[p->length - 1]);
 }
 
-int path_pop_last_token(PATH *p, char *out_token_text) {
-    if (!p || !out_token_text) return -1;
+PATH_TOKEN* path_get_next_token(PATH *p, PATH_TOKEN *pt) {
+    if (!p || !pt || p->length <= 0)
+        return NULL;
 
-    struct path_token *prev = NULL;
-    struct path_token *curr = p->first;
+    if (pt->index < 0 || pt->index >= p->length)
+        return NULL;
 
-    // traverse to the last token
-    while (curr && curr->next) {
-        prev = curr;
-        curr = curr->next;
-    }
+    if (pt != &p->tokens[pt->index])
+        return NULL;
 
-    if (curr) {
-        // copy the text of the last token
-        strncpy(out_token_text, curr->text, PATH_MAX_TOKEN_LEN);
-        out_token_text[PATH_MAX_TOKEN_LEN - 1] = '\0'; // ensure null termination
+    if (pt->index + 1 >= p->length)
+        return NULL;
 
-        // remove the last token from the list
-        if (prev) {
-            prev->next = NULL;
-        } else {
-            p->first = NULL; // list is now empty
-        }
-        free(curr);
-    } else {
-        out_token_text[0] = '\0'; // no token to pop
-    }
-    return 0;
+    return &p->tokens[pt->index + 1];
 }
 
 const char* path_get_token_text(PATH_TOKEN *pt) {
-    return pt->text;
+    return pt ? pt->text : NULL;
+}
+
+char* path_copy_token_text(PATH_TOKEN *pt, char *out) {
+    if (!pt || !out) return NULL;
+    return strncpy(out, pt->text, PATH_MAX_TOKEN_LEN);
 }

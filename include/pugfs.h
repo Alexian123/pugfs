@@ -2,6 +2,7 @@
 #define __PUGFS_H
 
 #include "disk_img.h"
+#include "path.h"
 
 #include <stdlib.h>
 
@@ -41,20 +42,20 @@ struct pugfs_filestat
     uint8_t attributes;
 };
 
-void pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
+int pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster);
 PUGFS* pugfs_mount(DISK_IMG *img);
 void pugfs_destroy(PUGFS *fs);
 
-int pugfs_touch(PUGFS *fs, const char *path);
-int pugfs_delete(PUGFS *fs, const char *path);
-int pugfs_trunc(PUGFS *fs, const char *path, uint32_t new_size);
-int pugfs_mkdir(PUGFS *fs, const char *path);
-int pugfs_rmdir(PUGFS *fs, const char *path); // will also remove all files in it
-int pugfs_lsdir(PUGFS *fs, const char *path, char *list_out, int max_entries);
-int pugfs_copy(PUGFS *fs, const char *src, const char *dst, int overwrite);
-int pugfs_move(PUGFS *fs, const char *src, const char *dst, int overwrite);
+int pugfs_touch(PUGFS *fs, PATH *path);
+int pugfs_delete(PUGFS *fs, PATH *path);
+int pugfs_trunc(PUGFS *fs, PATH *path, uint32_t new_size);
+int pugfs_mkdir(PUGFS *fs, PATH *path);
+int pugfs_rmdir(PUGFS *fs, PATH *path); // will also remove all files in it
+int pugfs_lsdir(PUGFS *fs, PATH *path, char *list_out, int max_entries);
+int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite);
+int pugfs_move(PUGFS *fs, PATH *src, PATH *dst, int overwrite);
 
-pugfs_fd pugfs_fopen(PUGFS *fs, const char *path, pugfs_file_mode_t mode);
+pugfs_fd pugfs_fopen(PUGFS *fs, PATH *path, pugfs_file_mode_t mode);
 int pugfs_fclose(PUGFS *fs, pugfs_fd fd);
 int pugfs_fstat(PUGFS *fs, pugfs_fd fd, struct pugfs_filestat *stat);
 int pugfs_fseek(PUGFS *fs, pugfs_fd fd, int offset, pugfs_seek_mode_t whence);

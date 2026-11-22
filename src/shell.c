@@ -8,7 +8,7 @@
 
 #define EXEC_CONTINUE        1
 #define EXEC_SUCCESS         0
-#define EXEC_EXIT           -1
+#define EXEC_EXIT           -100
 #define EXEC_ERR_GENERAL    -2
 
 #define MAX_INPUT_LEN  (PATH_MAX_LEN + 32)
@@ -29,6 +29,7 @@ static int _shell_execute_1_arg(PUGFS *fs, const char *cmd, const char *arg1);
 static int _shell_execute_2_args(PUGFS *fs, const char *cmd, const char *arg1, const char *arg2);
 static int _shell_execute_3_args(PUGFS *fs, const char *cmd, const char *arg1, const char *arg2, const char *arg3);
 static void _shell_print_help();
+static PATH* _shell_parse_path(const char *path);
 
 void shell_start(PUGFS *fs, DISK_IMG *img) {
     if (!fs || !img) {
@@ -149,40 +150,65 @@ static int _shell_execute_1_arg(PUGFS *fs, const char *cmd, const char *arg1) {
             printf("Usage: touch <filepath>\n");
             return EXEC_ERR_GENERAL;
         } else {
-            return pugfs_touch(fs, arg1);
+            PATH *p = _shell_parse_path(arg1);
+            if (!p) return EXEC_ERR_GENERAL;
+            int res = pugfs_touch(fs, p);
+            path_destroy(p);
+            return res;
         }
     } else if (STREQ(cmd, "del")) {
         if (!arg1) {
             printf("Usage: del <filepath>\n");
             return EXEC_ERR_GENERAL;
         } else {
-            return pugfs_delete(fs, arg1);
+            PATH *p = _shell_parse_path(arg1);
+            if (!p) return EXEC_ERR_GENERAL;
+            int res =  pugfs_delete(fs, p);
+            path_destroy(p);
+            return res;
         }
     } else if (STREQ(cmd, "mkdir")) {
         if (!arg1) {
             printf("Usage: mkdir <dirpath>\n");
             return EXEC_ERR_GENERAL;
         } else {
-            return pugfs_mkdir(fs, arg1);
+            PATH *p = _shell_parse_path(arg1);
+            if (!p) return EXEC_ERR_GENERAL;
+            int res = pugfs_mkdir(fs, p);
+            path_destroy(p);
+            return res;
         }
     } else if (STREQ(cmd, "rmdir")) {
         if (!arg1) {
             printf("Usage: rmdir <dirpath>\n");
             return EXEC_ERR_GENERAL;
         } else {
-            return pugfs_rmdir(fs, arg1);
+            PATH *p = _shell_parse_path(arg1);
+            if (!p) return EXEC_ERR_GENERAL;
+            int res = pugfs_rmdir(fs, p);
+            path_destroy(p);
+            return res;
         }
     } else if (STREQ(cmd, "ls")) {
         if (!arg1) {
             arg1 = working_dir;
         }
-        int res = pugfs_lsdir(fs, arg1, list_buffer, MAX_LIST_ENTRIES);
-        if (res < 0) return res;
+
+        PATH *p = _shell_parse_path(arg1);
+        if (!p) return EXEC_ERR_GENERAL;
+
+        int res = pugfs_lsdir(fs, p, list_buffer, MAX_LIST_ENTRIES);
+        if (res < 0) {
+            path_destroy(p);
+            return res;
+        }
 
         // print the entries
         for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
             printf("\t%s\n", list_buffer + i);
         }
+
+        path_destroy(p);
         return EXIT_SUCCESS;
     } else if (STREQ(cmd, "cd")) {
         if (!arg1) {
@@ -202,7 +228,11 @@ static int _shell_execute_2_args(PUGFS *fs, const char *cmd, const char *arg1, c
         } else {
             uint32_t new_size = 0;
             sscanf(arg2, "%u", &new_size);
-            return pugfs_trunc(fs, arg1, new_size);
+            PATH *p = _shell_parse_path(arg1);
+            if (!p) return EXEC_ERR_GENERAL;
+            int res = pugfs_trunc(fs, p, new_size);
+            path_destroy(p);
+            return res;
         }
     }
     return EXEC_CONTINUE;
@@ -214,28 +244,52 @@ static int _shell_execute_3_args(PUGFS *fs, const char *cmd, const char *arg1, c
             printf("Usage: mv <src> <dst> [-f]\n");
             return EXEC_ERR_GENERAL;
         } else {
+            PATH *psrc = _shell_parse_path(arg1);
+            if (!psrc) return EXEC_ERR_GENERAL;
+            PATH *pdst = _shell_parse_path(arg2);
+            if (!pdst) {
+                path_destroy(psrc);
+                return EXEC_ERR_GENERAL;
+            }
+
+            int res = EXEC_ERR_GENERAL;
             if (!arg3) {
-                return pugfs_move(fs, arg1, arg2, 0);
+                res = pugfs_move(fs, psrc, pdst, 0);
+            } else if (STREQ(arg3, "-f")) {
+                res = pugfs_move(fs, psrc, pdst, 1);
+            } else {
+                printf("Usage: mv <src> <dst> [-f]\n");
             }
-            if (STREQ(arg3, "-f")) {
-                return pugfs_move(fs, arg1, arg2, 1);
-            }
-            printf("Usage: mv <src> <dst> [-f]\n");
-            return EXEC_ERR_GENERAL;
+
+            path_destroy(psrc);
+            path_destroy(pdst);
+            return res;
         }
     } else if (STREQ(cmd, "cp")) {
         if (!arg1 || !arg2) {
             printf("Usage: cp <src> <dst> [-f]\n");
             return EXEC_ERR_GENERAL;
         } else {
+            PATH *psrc = _shell_parse_path(arg1);
+            if (!psrc) return EXEC_ERR_GENERAL;
+            PATH *pdst = _shell_parse_path(arg2);
+            if (!pdst) {
+                path_destroy(psrc);
+                return EXEC_ERR_GENERAL;
+            }
+
+            int res = EXEC_ERR_GENERAL;
             if (!arg3) {
-                return pugfs_copy(fs, arg1, arg2, 0);
+                res = pugfs_copy(fs, psrc, pdst, 0);
+            } else if (STREQ(arg3, "-f")) {
+                res = pugfs_copy(fs, psrc, pdst, 1);
+            } else {
+                printf("Usage: cp <src> <dst> [-f]\n");
             }
-            if (STREQ(arg3, "-f")) {
-                return pugfs_copy(fs, arg1, arg2, 1);
-            }
-            printf("Usage: cp <src> <dst> [-f]\n");
-            return EXEC_ERR_GENERAL;
+
+            path_destroy(psrc);
+            path_destroy(pdst);
+            return res;
         }
     }
     return EXEC_CONTINUE;
@@ -244,4 +298,9 @@ static int _shell_execute_3_args(PUGFS *fs, const char *cmd, const char *arg1, c
 static void _shell_print_help() {
     printf("Avaliable commands:\n");
     printf("exit\ntouch\ndel\nmkdir\nrmdir\nls\ntrunc\nmv\ncp\ncd\n\n");
+}
+
+static PATH* _shell_parse_path(const char *path) {
+    if (!path_is_valid(path)) return NULL;
+    return path_parse(path, NULL);
 }
