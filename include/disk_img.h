@@ -19,6 +19,7 @@ DISK_IMG_STREAM* disk_img_stream_create(DISK_IMG *img);
 void disk_img_stream_destroy(DISK_IMG_STREAM *stream);
 
 int disk_img_stream_seek(DISK_IMG_STREAM *stream, uint32_t sector, uint32_t offset);
+int disk_img_stream_get_pos(DISK_IMG_STREAM *stream, uint32_t *sector_out, uint32_t *offset_out);
 
 // Advances the stream by count bytes, potentially moving to the next sector
 void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count);

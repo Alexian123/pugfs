@@ -117,6 +117,13 @@ int disk_img_stream_seek(DISK_IMG_STREAM *stream, uint32_t sector, uint32_t offs
     return 0;
 }
 
+int disk_img_stream_get_pos(DISK_IMG_STREAM *stream, uint32_t *sector_out, uint32_t *offset_out) {
+    if (!stream || !stream->img || !sector_out || !offset_out) return -1;
+    *sector_out = stream->sector;
+    *offset_out = stream->offset;
+    return 0;
+}
+
 void disk_img_stream_advance(DISK_IMG_STREAM *stream, uint32_t count) {
     stream->offset += count;
     stream->sector += stream->offset / stream->img->sector_size;

@@ -107,7 +107,7 @@ static int _shell_execute(PUGFS *fs) {
     char *arg1 = strtok(NULL, " \t");
     char *arg2 = strtok(NULL, " \t");
     char *arg3 = strtok(NULL, " \t");
-    char *arg4 = strtok(NULL, " \t");
+    //char *arg4 = strtok(NULL, " \t");
     int res = 0;
 
     // 0 args commands
@@ -134,7 +134,7 @@ static int _shell_execute(PUGFS *fs) {
 }
 
 
-static int _shell_execute_no_args(PUGFS *fs, const char *cmd) {
+static int _shell_execute_no_args(PUGFS*, const char *cmd) {
     if (STREQ(cmd, "exit")) {
         return EXEC_EXIT;
     } else if (STREQ(cmd, "help")) {

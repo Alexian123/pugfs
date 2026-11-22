@@ -87,8 +87,10 @@ static int _pugfs_write_ftable_entry(PUGFS *fs, uint32_t index, uint32_t value);
 
 // cluster chain management
 static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out);
-static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out);
+//static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out);
 static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster);
+static int _pugfs_copy_cluster_data(PUGFS *fs, uint32_t src_cluster, uint32_t dst_cluster);
+static int _pugfs_duplicate_cluster_chain(PUGFS *fs, uint32_t src_start_cluster, uint32_t *dst_start_cluster_out);
 
 // functions for comparing directory entries
 static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
@@ -164,6 +166,7 @@ static int _pugfs_create_new_dir_entry(
 
 // utility functions
 static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir); // 1 if empty, 0 if not, <0 on error
+static int _pugfs_copy_dir_contents_rec(PUGFS *fs, const struct pugfs_dir_entry *src, const struct pugfs_dir_entry *dst);
 
 int pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
     if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return -1;
@@ -482,13 +485,92 @@ int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
     if (path_is_child_of(dst, src) == 1) {
         return -9;
     }
-    
-    // copy dir entry and data clusters
-    // if copying a dir, copy the data clusters of all entries in it
-    // go recursively in child directories and copy everything
-    // kinda sucks tbh
 
-    return -1;
+    struct pugfs_dir_entry src_entry;
+    uint32_t src_index_in_cluster = 0, src_cluster_index = 0;
+    int res = _pugfs_find_dir_entry_absolute(fs, src, &src_entry, &src_index_in_cluster, &src_cluster_index);
+    if (res != 0) {
+        return -1;
+    }
+
+    struct pugfs_dir_entry dst_entry;
+    uint32_t dst_index_in_cluster = 0, dst_cluster_index = 0;
+    res = _pugfs_find_dir_entry_absolute(fs, dst, &dst_entry, &dst_index_in_cluster, &dst_cluster_index);
+    if (res == 0) {
+        if (!overwrite) {
+            return -2; // dst already exists
+        }
+        // will replace dest
+
+        // check matching types
+        if (src_entry.type != dst_entry.type) {
+            return -8; // type mismatch
+        }
+
+        // if dir, check if it is empty
+        if (dst_entry.type == PUGFS_DIR_ENTRY_TYPE_DIR) {
+            res = _pugfs_dir_is_empty(fs, &dst_entry);
+            if (res <= 0) {
+                return -7; // dir not empty
+            }
+        }
+    } else {
+        // create new entry at dest with the same type as src (so it preallocates a cluster)
+        res = _pugfs_create_new_dir_entry(fs, dst, src_entry.type, &dst_entry, &dst_index_in_cluster, &dst_cluster_index);
+        if (res != 0) {
+            return -3; // failed to create new entry
+        }
+    }
+    // by this point, dst_entry and indices are valid (I hope)
+
+    // save cluster chain start of dest if it is a file, to free later
+    // if it is a dir, it does not need to be freed
+    int32_t old_dest_chain_start = 0;
+    if (dst_entry.type == PUGFS_DIR_ENTRY_TYPE_FILE) {
+        old_dest_chain_start = dst_entry.starting_cluster_index;
+    }
+
+    // copy the src entry fields
+    dst_entry.attributes = src_entry.attributes;
+    dst_entry.creation_ts = src_entry.creation_ts;
+    memcpy(dst_entry.reserved, src_entry.reserved, sizeof(dst_entry.reserved));
+    dst_entry.size = src_entry.size;
+    dst_entry.last_access_ts = 1; // TODO: set to now
+
+    // if copying a file, it's easy
+    if (dst_entry.type == PUGFS_DIR_ENTRY_TYPE_FILE) {
+        // just duplicate the file contents and update the new entry
+        uint32_t new_dest_chain_start = 0;
+        res = _pugfs_duplicate_cluster_chain(fs, src_entry.starting_cluster_index, &new_dest_chain_start);
+        if (res != 0) {
+            return -10;
+        }
+        dst_entry.starting_cluster_index = new_dest_chain_start;
+        // all that's left is to write the dir entry to disk
+    } else { // otherwise, it sucks for me 
+        // pass it over to the recursive function
+        res = _pugfs_copy_dir_contents_rec(fs, &src_entry, &dst_entry);
+        if (res != 0) {
+            return -11;
+        }
+    }
+
+    // write the dst entry back to disk
+    res = _pugfs_write_dir_entry_to_data_cluster(fs, dst_cluster_index, dst_index_in_cluster, &dst_entry);
+    if (res != 0) {
+        return -4; // failed to write dst entry
+    }
+
+    // free old cluster chain of dest if it was a file
+    // otherwise it's set to 0
+    if (old_dest_chain_start != 0) {
+        res = _pugfs_free_cluster_chain(fs, old_dest_chain_start);
+        if (res != 0) {
+            return -6;
+        }
+    }
+
+    return 0;
 }
 
 int pugfs_move(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
@@ -784,40 +866,40 @@ static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out) {
     return -1; // no free clusters found
 }
 
-static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out) {
-    if (!fs || !starting_cluster_out || count == 0) return -1;
+// static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out) {
+//     if (!fs || !starting_cluster_out || count == 0) return -1;
 
-    uint32_t first_cluster = 0, prev_cluster = 0;
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t curr_cluster = 0;
+//     uint32_t first_cluster = 0, prev_cluster = 0;
+//     for (uint32_t i = 0; i < count; ++i) {
+//         uint32_t curr_cluster = 0;
 
-        int res = _pugfs_allocate_cluster(fs, &curr_cluster);
-        if (res != 0) {
-            if (first_cluster != 0) {
-                _pugfs_free_cluster_chain(fs, first_cluster);
-            }
-            return -1;
-        }
+//         int res = _pugfs_allocate_cluster(fs, &curr_cluster);
+//         if (res != 0) {
+//             if (first_cluster != 0) {
+//                 _pugfs_free_cluster_chain(fs, first_cluster);
+//             }
+//             return -1;
+//         }
 
-        if (i == 0) {
-            first_cluster = curr_cluster;
-        } else {
-            res = _pugfs_write_ftable_entry(fs, prev_cluster, curr_cluster);
+//         if (i == 0) {
+//             first_cluster = curr_cluster;
+//         } else {
+//             res = _pugfs_write_ftable_entry(fs, prev_cluster, curr_cluster);
 
-            if (res != 0) {
-                // the newly allocated cluster isn't linked yet
-                _pugfs_write_ftable_entry(fs, curr_cluster, PUGFS_FTABLE_ENTRY_FREE);
-                _pugfs_free_cluster_chain(fs, first_cluster);
-                return -1;
-            }
-        }
+//             if (res != 0) {
+//                 // the newly allocated cluster isn't linked yet
+//                 _pugfs_write_ftable_entry(fs, curr_cluster, PUGFS_FTABLE_ENTRY_FREE);
+//                 _pugfs_free_cluster_chain(fs, first_cluster);
+//                 return -1;
+//             }
+//         }
 
-        prev_cluster = curr_cluster;
-    }
+//         prev_cluster = curr_cluster;
+//     }
 
-    *starting_cluster_out = first_cluster;
-    return 0;
-}
+//     *starting_cluster_out = first_cluster;
+//     return 0;
+// }
 
 static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster) {
     if (!fs || !fs->stream || starting_cluster == 0) return -1;
@@ -853,6 +935,118 @@ static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster) {
     }
 
     // reaching this point means the chain is cyclic or invalid
+    return -1;
+}
+
+static int _pugfs_copy_cluster_data(PUGFS *fs, uint32_t src_cluster, uint32_t dst_cluster) {
+    if (!fs || !fs->stream || src_cluster == 0 || dst_cluster == 0)
+        return -1;
+
+    // check if clusters are in data area bounds
+    uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
+    if (src_cluster < 1 || src_cluster > data_clusters) return -1;
+    if (dst_cluster < 1 || dst_cluster > data_clusters) return -1;
+
+    // copy 1 sector at a time
+    uint32_t sectors_per_cluster = fs->header.sectors_per_cluster;
+    uint32_t src_start_sector = fs->header.data_start_sector + (src_cluster - 1) * fs->header.sectors_per_cluster;
+    uint32_t dst_start_sector = fs->header.data_start_sector + (dst_cluster - 1) * fs->header.sectors_per_cluster;
+    int res = -1;
+    for (uint32_t i = 0; i < sectors_per_cluster; ++i) {
+        // set stream to the src sector
+        res = disk_img_stream_seek(fs->stream, src_start_sector + i, 0);
+        if (res < 0) return -1;
+
+        // read sector
+        res = disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
+        if (res != 1) return -1;
+
+        // set stream to the dst sector
+        res = disk_img_stream_seek(fs->stream, dst_start_sector + i, 0);
+        if (res < 0) return -1;
+
+        // write sector
+        res = disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+        if (res != 1) return -1;
+    }
+
+    return 0;
+}
+
+static int _pugfs_duplicate_cluster_chain(PUGFS *fs, uint32_t src_start_cluster, uint32_t *dst_start_cluster_out) {
+    if (!fs || !fs->stream || src_start_cluster == 0 || !dst_start_cluster_out)
+        return -1;
+
+    if (fs->header.sectors_per_cluster == 0)
+        return -1;
+
+    uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
+
+    if (data_clusters == 0)
+        return -1;
+
+    uint32_t src_cluster = src_start_cluster;
+    uint32_t first_dst_cluster = 0;
+    uint32_t prev_dst_cluster = 0;
+
+    for (uint32_t i = 0; i < data_clusters; ++i) {
+        if (src_cluster < 1 || src_cluster > data_clusters)
+            goto rollback;
+
+        uint32_t next = _pugfs_read_ftable_entry(fs, src_cluster);
+
+        if (next == PUGFS_FTABLE_ENTRY_INVALID ||
+            next == PUGFS_FTABLE_ENTRY_FREE ||
+            next == PUGFS_FTABLE_ENTRY_RESERVED ||
+            next == PUGFS_FTABLE_ENTRY_BAD)
+            goto rollback;
+
+        if (next != PUGFS_FTABLE_ENTRY_EOC && (next < 1 || next > data_clusters))
+            goto rollback;
+
+        uint32_t curr_dst_cluster = 0;
+
+        // allocate new cluster
+        int res = _pugfs_allocate_cluster(fs, &curr_dst_cluster);
+        if (res != 0)
+            goto rollback;
+
+        // copy cluster data
+        res = _pugfs_copy_cluster_data(fs, src_cluster, curr_dst_cluster);
+        if (res != 0) {
+            _pugfs_write_ftable_entry(fs, curr_dst_cluster, PUGFS_FTABLE_ENTRY_FREE);
+            goto rollback;
+        }
+    
+        // link new cluster
+        if (i == 0) {
+            first_dst_cluster = curr_dst_cluster;
+        } else {
+            res = _pugfs_write_ftable_entry(fs, prev_dst_cluster, curr_dst_cluster);
+            if (res != 0) {
+                _pugfs_write_ftable_entry(fs, curr_dst_cluster, PUGFS_FTABLE_ENTRY_FREE);
+                goto rollback;
+            }
+        }
+
+        prev_dst_cluster = curr_dst_cluster;
+
+        // end of src chain
+        if (next == PUGFS_FTABLE_ENTRY_EOC) {
+            *dst_start_cluster_out = first_dst_cluster;
+            return 0;
+        }
+
+        src_cluster = next;
+    }
+
+    // chain is cyclic or excessively long
+    goto rollback;
+
+rollback:
+    if (first_dst_cluster != 0) {
+        _pugfs_free_cluster_chain(fs, first_dst_cluster);
+    }
     return -1;
 }
 
@@ -957,6 +1151,9 @@ static int _pugfs_find_dir_entry_in_dir(
         if (res == 0) { // found it
             *out_cluster_index = cluster_index;
             return 0;
+        }
+        if (res < 0) {
+            return res;
         }
 
         // end of cluster chain
@@ -1067,6 +1264,9 @@ static int _pugfs_list_dir_entries_in_dir(
             list,
             max_entries - found_entries
         );
+        if (res < 0) {
+            return res;
+        }
         found_entries += res;
         list += (res * PUGFS_FILENAME_BYTES);
 
@@ -1197,7 +1397,9 @@ static int _pugfs_write_new_dir_entry_to_dir(
         &eod_index_in_cluster,
         &eod_cluster_index
     );
-    if (res != 0) return res;   // no EOD entry found, invalid dir
+    if (res != 0) {
+        return res;   // no EOD entry found, invalid dir
+    }
 
     res = _pugfs_find_dir_entry_in_dir(
         fs, 
@@ -1308,11 +1510,17 @@ static int _pugfs_create_new_dir_entry(
     path_destroy(parent);
     if (res != 0 || parent_dir_entry.type != PUGFS_DIR_ENTRY_TYPE_DIR) return -1;
 
+    res = _pugfs_write_new_dir_entry_to_dir(fs, &parent_dir_entry, &new_entry, out_index_in_cluster, out_cluster_index);
+    if (res != 0) {
+        return res;
+    }
+
     // propagate the new entry to the caller
     if (out_entry) {
         memcpy(out_entry, &new_entry, sizeof(struct pugfs_dir_entry));
     }
-    return _pugfs_write_new_dir_entry_to_dir(fs, &parent_dir_entry, &new_entry, out_index_in_cluster, out_cluster_index);
+
+    return 0;
 }
 
 static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir) {
@@ -1341,4 +1549,124 @@ static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir) {
         return 1;  // nothing found
 
     return -1;     // unexpected result
+}
+
+static int _pugfs_copy_dir_contents_rec(PUGFS *fs, const struct pugfs_dir_entry *src, const struct pugfs_dir_entry *dst) {
+    if (!fs || !src || !dst) {printf("invalid args\n"); return -1; }
+    if (src->type != PUGFS_DIR_ENTRY_TYPE_DIR || dst->type != PUGFS_DIR_ENTRY_TYPE_DIR) {
+        return -1;
+    }
+
+    uint32_t data_clusters = fs->header.data_sectors / fs->header.sectors_per_cluster;
+    uint32_t cluster_index = src->starting_cluster_index;
+    uint64_t bytes_per_cluster = (uint64_t)fs->header.sectors_per_cluster * fs->header.sector_size;
+    uint32_t entries_per_cluster = bytes_per_cluster / sizeof(struct pugfs_dir_entry);
+    int res = 0;
+    struct pugfs_dir_entry entry;
+
+    for (uint32_t i = 0; i < data_clusters; ++i) {  // limit to 'data_clusters' iterations
+        if (cluster_index < 1 || cluster_index > data_clusters) {
+            printf("cluster index oub\n");
+            return -1;
+        }
+
+        uint32_t ftable_entry = _pugfs_read_ftable_entry(fs, cluster_index); 
+
+        // invalid entries
+        if (ftable_entry == PUGFS_FTABLE_ENTRY_RESERVED ||
+            ftable_entry == PUGFS_FTABLE_ENTRY_INVALID ||
+            ftable_entry == PUGFS_FTABLE_ENTRY_BAD ||
+            ftable_entry == PUGFS_FTABLE_ENTRY_FREE) {
+            return -1;
+        }
+
+        // set stream starting sector
+        uint32_t sector = fs->header.data_start_sector + (cluster_index - 1) * fs->header.sectors_per_cluster;
+        uint32_t offset = 0;
+
+        // read at most entries_per_cluster or until EOD
+        for (uint32_t j = 0; j < entries_per_cluster; ++j) {
+            memset(&entry, 0, sizeof(struct pugfs_dir_entry));
+
+            // restore stream reading position
+            res = disk_img_stream_seek(fs->stream, sector, offset);
+            if (res < 0) {
+                return -1;
+            }
+
+            res = disk_img_stream_read_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &entry);
+            if (res != sizeof(struct pugfs_dir_entry)) {
+                return -1;
+            }
+
+            // save stream reading position
+            res = disk_img_stream_get_pos(fs->stream, &sector, &offset);
+            if (res < 0) {
+                return -1;
+            }
+
+            // check EOD
+            if (entry.type == PUGFS_DIR_ENTRY_TYPE_EOD) {
+                break;
+            }
+
+            // if entry not file or dir skip
+            if (entry.type != PUGFS_DIR_ENTRY_TYPE_DIR && entry.type != PUGFS_DIR_ENTRY_TYPE_FILE) {
+                continue;
+            }
+
+            struct pugfs_dir_entry new_entry;
+            uint32_t new_cluster_index = 0, new_index_in_cluster = 0;
+            memcpy(&new_entry, &entry, sizeof(new_entry));
+            new_entry.last_access_ts = 1; // TODO: set to now
+
+            if (entry.type == PUGFS_DIR_ENTRY_TYPE_FILE) {
+                new_entry.type = PUGFS_DIR_ENTRY_TYPE_FREE; // free so the write func won't allocate a cluster
+                res = _pugfs_write_new_dir_entry_to_dir(fs, dst, &new_entry, &new_index_in_cluster, &new_cluster_index);
+                if (res != 0) {
+                    return res;
+                }
+
+                // duplicate cluster chain
+                uint32_t new_data_start_cluster = 0;
+                res = _pugfs_duplicate_cluster_chain(fs, entry.starting_cluster_index, &new_data_start_cluster);
+                if (res != 0) {
+                    return res;
+                }
+                new_entry.starting_cluster_index = new_data_start_cluster;
+                new_entry.type = PUGFS_DIR_ENTRY_TYPE_FILE; // restore the file flag
+            } else if (entry.type == PUGFS_DIR_ENTRY_TYPE_DIR) {
+                // the write will allocate a cluster and add an EOD automatically
+                res = _pugfs_write_new_dir_entry_to_dir(fs, dst, &new_entry, &new_index_in_cluster, &new_cluster_index);
+                if (res != 0) {
+                    return res;
+                }
+
+                // (re)curse
+                res = _pugfs_copy_dir_contents_rec(fs, &entry, &new_entry);
+                if (res != 0) {
+                    return res;
+                }
+            }
+
+            // write the final new entry back to the disk
+            res = _pugfs_write_dir_entry_to_data_cluster(fs, new_cluster_index, new_index_in_cluster, &new_entry);
+            if (res != 0) {
+                return res;
+            }
+        }
+
+        // end of cluster chain
+        if (ftable_entry == PUGFS_FTABLE_ENTRY_EOC) {
+            break;
+        }
+
+        // check if next index is valid
+        if (ftable_entry < 1 || ftable_entry > data_clusters)
+            break;
+
+        cluster_index = ftable_entry;
+    }
+
+    return 0;
 }
