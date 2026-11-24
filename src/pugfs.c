@@ -81,14 +81,11 @@ struct pugfs_dir_iterator
     uint32_t _next_index_in_cluster;        // index in cluster for next iteration
 };
 
-// return 0 on equal, <0 if e1 < e2, >0 if e1 > e2
-typedef int (*dir_entry_compare_func_t)(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
-
-struct pugfs_dir_entry_comparator
+struct pugfs_de_comparator
 {
-    struct pugfs_dir_entry cmp_entry; // will be used as e2 param
     // return 0 on equal, <0 if e1 < e2, >0 if e1 > e2
     int (*cmp_func)(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
+    struct pugfs_dir_entry cmp_entry; // can be optionally used as e2 param
 };
 
 // fs validation
@@ -112,7 +109,6 @@ static int _pugfs_write_ftable_entry(PUGFS *fs, uint32_t index, uint32_t value);
 
 // cluster chain management
 static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out);
-//static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out);
 static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster);
 static int _pugfs_copy_cluster_data(PUGFS *fs, uint32_t src_cluster, uint32_t dst_cluster);
 static int _pugfs_duplicate_cluster_chain(PUGFS *fs, uint32_t src_start_cluster, uint32_t *dst_start_cluster_out);
@@ -125,8 +121,7 @@ static int _pugfs_compare_dir_entries_file_or_dir(const struct pugfs_dir_entry *
 // query functions for directory entries
 static int _pugfs_find_dir_entry_in_dir(
     PUGFS *fs,
-    const struct pugfs_dir_entry *entry_to_find, 
-    dir_entry_compare_func_t cmp,
+    const struct pugfs_de_comparator *comparator,
     const struct pugfs_dir_entry *dir,
     struct pugfs_dir_entry *out_entry,
     uint32_t *out_index_in_cluster,
@@ -134,8 +129,7 @@ static int _pugfs_find_dir_entry_in_dir(
 );
 static int _pugfs_list_dir_entries_in_dir(
     PUGFS *fs,
-    const struct pugfs_dir_entry *entry_to_find, 
-    dir_entry_compare_func_t cmp,
+    const struct pugfs_de_comparator *comparator,
     const struct pugfs_dir_entry *dir,
     char *list,
     int max_entries
@@ -158,14 +152,14 @@ static int _pugfs_write_dir_entry_to_data_cluster(
 static int _pugfs_write_new_dir_entry_to_dir(
     PUGFS *fs, 
     const struct pugfs_dir_entry *dir, 
-    struct pugfs_dir_entry *entry,
+    struct pugfs_dir_entry *entry,      // 1 cluster will be allocated if entry.type != FREE
     uint32_t *out_index_in_cluster, 
     uint32_t *out_cluster_index
 );
 static int _pugfs_create_new_dir_entry_absolute(
     PUGFS *fs, 
     PATH *path,
-    uint8_t type, 
+    uint8_t type,                       // 1 cluster will be allocated if type != FREE
     struct pugfs_dir_entry *out_entry,
     uint32_t *out_index_in_cluster,
     uint32_t *out_cluster_index
@@ -478,8 +472,10 @@ int pugfs_lsdir(PUGFS *fs, PATH *path, char *list_out, int max_entries) {
     }
 
     memset(list_out, 0, max_entries * PUGFS_FILENAME_BYTES);
-    struct pugfs_dir_entry dummy;
-    return _pugfs_list_dir_entries_in_dir(fs, &dummy, _pugfs_compare_dir_entries_file_or_dir, &entry, list_out, max_entries);
+    struct pugfs_de_comparator comparator;
+    // cmp_entry is not needed
+    comparator.cmp_func = _pugfs_compare_dir_entries_file_or_dir; // will match entries of type file or dir
+    return _pugfs_list_dir_entries_in_dir(fs, &comparator, &entry, list_out, max_entries);
 }
 
 int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
@@ -880,41 +876,6 @@ static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out) {
     return -1; // no free clusters found
 }
 
-// static int _pugfs_allocate_cluster_chain(PUGFS *fs, uint32_t count, uint32_t *starting_cluster_out) {
-//     if (!fs || !starting_cluster_out || count == 0) return -1;
-
-//     uint32_t first_cluster = 0, prev_cluster = 0;
-//     for (uint32_t i = 0; i < count; ++i) {
-//         uint32_t curr_cluster = 0;
-
-//         int res = _pugfs_allocate_cluster(fs, &curr_cluster);
-//         if (res != 0) {
-//             if (first_cluster != 0) {
-//                 _pugfs_free_cluster_chain(fs, first_cluster);
-//             }
-//             return -1;
-//         }
-
-//         if (i == 0) {
-//             first_cluster = curr_cluster;
-//         } else {
-//             res = _pugfs_write_ftable_entry(fs, prev_cluster, curr_cluster);
-
-//             if (res != 0) {
-//                 // the newly allocated cluster isn't linked yet
-//                 _pugfs_write_ftable_entry(fs, curr_cluster, PUGFS_FTABLE_ENTRY_FREE);
-//                 _pugfs_free_cluster_chain(fs, first_cluster);
-//                 return -1;
-//             }
-//         }
-
-//         prev_cluster = curr_cluster;
-//     }
-
-//     *starting_cluster_out = first_cluster;
-//     return 0;
-// }
-
 static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster) {
     if (!fs || !fs->stream || starting_cluster == 0) return -1;
 
@@ -1082,14 +1043,13 @@ static int _pugfs_compare_dir_entries_file_or_dir(const struct pugfs_dir_entry *
 
 static int _pugfs_find_dir_entry_in_dir(
     PUGFS *fs,
-    const struct pugfs_dir_entry *entry_to_find, 
-    dir_entry_compare_func_t cmp,
+    const struct pugfs_de_comparator *comparator,
     const struct pugfs_dir_entry *dir,
     struct pugfs_dir_entry *out_entry,
     uint32_t *out_index_in_cluster,
     uint32_t *out_cluster_index // FTable index of the cluster containing the entry
 ) {
-    if (!fs || !entry_to_find || !dir || !cmp || !out_index_in_cluster || !out_cluster_index) return -1;
+    if (!fs || !comparator || !comparator->cmp_func || !dir || !out_index_in_cluster || !out_cluster_index) return -1;
     if (dir->type != PUGFS_DIR_ENTRY_TYPE_DIR) return -1;
 
     // prepare iterator
@@ -1101,7 +1061,7 @@ static int _pugfs_find_dir_entry_in_dir(
     // iterate until EOD or error
     int res = 0;
     while ((res = _pugfs_iter_next(fs, &iter)) >= 0) {
-        if (cmp(&iter.current, entry_to_find) == 0) {
+        if (comparator->cmp_func(&iter.current, &comparator->cmp_entry) == 0) {
             if (out_entry) {
                 memcpy(out_entry, &iter.current, sizeof(*out_entry));
             }
@@ -1122,13 +1082,12 @@ static int _pugfs_find_dir_entry_in_dir(
 
 static int _pugfs_list_dir_entries_in_dir(
     PUGFS *fs,
-    const struct pugfs_dir_entry *entry_to_find, 
-    dir_entry_compare_func_t cmp,
+    const struct pugfs_de_comparator *comparator,
     const struct pugfs_dir_entry *dir,
     char *list,
     int max_entries
 ) {
-    if (!fs || !entry_to_find || !dir || !cmp || !list || max_entries <= 0) return -1;
+    if (!fs || !comparator || !comparator->cmp_func || !dir || !list || max_entries <= 0) return -1;
     if (dir->type != PUGFS_DIR_ENTRY_TYPE_DIR) return -1;
 
     // prepare iterator
@@ -1145,7 +1104,7 @@ static int _pugfs_list_dir_entries_in_dir(
             break;
         }
 
-        if (cmp(&iter.current, entry_to_find) == 0) {
+        if (comparator->cmp_func(&iter.current, &comparator->cmp_entry) == 0) {
             memcpy(list, iter.current.name, PUGFS_FILENAME_BYTES);
             ++found_entries;
             list += PUGFS_FILENAME_BYTES;
@@ -1180,8 +1139,9 @@ static int _pugfs_find_dir_entry_absolute(
         return 0;
     }
 
-    struct pugfs_dir_entry search_entry;
-    memset(&search_entry, 0, sizeof(struct pugfs_dir_entry));
+    struct pugfs_de_comparator comparator;
+    comparator.cmp_func = _pugfs_compare_dir_entries_by_name;
+    memset(&comparator.cmp_entry, 0, sizeof(struct pugfs_dir_entry));
 
     int res = 0;
     while (tok) {
@@ -1193,13 +1153,12 @@ static int _pugfs_find_dir_entry_absolute(
             break;
         }
 
-        memset(&search_entry, 0, sizeof(search_entry));
-        memcpy(search_entry.name, name, name_len);
+        memset(&comparator.cmp_entry, 0, sizeof(comparator.cmp_entry));
+        memcpy(comparator.cmp_entry.name, name, name_len);
 
         res = _pugfs_find_dir_entry_in_dir(
             fs, 
-            &search_entry, 
-            _pugfs_compare_dir_entries_by_name,
+            &comparator,
             parent,
             out_entry,
             out_index_in_cluster,
@@ -1256,19 +1215,21 @@ static int _pugfs_write_new_dir_entry_to_dir(
     if (!fs || !dir || !entry) return -1;
 
     // find the the first free and the EOD entry in the parent 
-    struct pugfs_dir_entry free_entry, eod_entry, search_entry_free, search_entry_eod;
+    struct pugfs_dir_entry free_entry, eod_entry;
     uint32_t free_index_in_cluster = 0, eod_index_in_cluster = 0, free_cluster_index = 0, eod_cluster_index = 0;
-    memset(&free_entry, 0, sizeof(struct pugfs_dir_entry));
-    memset(&eod_entry, 0, sizeof(struct pugfs_dir_entry));
-    memset(&search_entry_free, 0, sizeof(struct pugfs_dir_entry));
-    memset(&search_entry_eod, 0, sizeof(struct pugfs_dir_entry));
-    search_entry_free.type = PUGFS_DIR_ENTRY_TYPE_FREE;
-    search_entry_eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
+    memset(&free_entry, 0, sizeof(free_entry));
+    memset(&eod_entry, 0, sizeof(eod_entry));
+
+    // prepare comparators
+    struct pugfs_de_comparator comparator_eod, comparator_free;
+    comparator_eod.cmp_func = _pugfs_compare_dir_entries_by_type;
+    comparator_eod.cmp_entry.type = PUGFS_DIR_ENTRY_TYPE_EOD;
+    comparator_free.cmp_func = _pugfs_compare_dir_entries_by_type;
+    comparator_free.cmp_entry.type = PUGFS_DIR_ENTRY_TYPE_FREE;
 
     int res = _pugfs_find_dir_entry_in_dir(
         fs, 
-        &search_entry_eod, 
-        _pugfs_compare_dir_entries_by_type,
+        &comparator_eod,
         dir,
         &eod_entry,
         &eod_index_in_cluster,
@@ -1280,8 +1241,7 @@ static int _pugfs_write_new_dir_entry_to_dir(
 
     res = _pugfs_find_dir_entry_in_dir(
         fs, 
-        &search_entry_free, 
-        _pugfs_compare_dir_entries_by_type,
+        &comparator_free,
         dir,
         &free_entry,
         &free_index_in_cluster,
@@ -1405,14 +1365,17 @@ static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir) {
 
     if (dir->type != PUGFS_DIR_ENTRY_TYPE_DIR) return -1;
 
-    struct pugfs_dir_entry search_entry, found_entry;
-    memset(&search_entry, 0, sizeof(search_entry));
+    struct pugfs_dir_entry found_entry;
     memset(&found_entry, 0, sizeof(found_entry));
     uint32_t cluster_index, index_in_cluster;
+
+    struct pugfs_de_comparator comparator;
+    comparator.cmp_func = _pugfs_compare_dir_entries_file_or_dir;
+    // cmp_entry not needed
+
     int res = _pugfs_find_dir_entry_in_dir(
         fs,
-        &search_entry,
-        _pugfs_compare_dir_entries_file_or_dir,
+        &comparator,
         dir,
         &found_entry,
         &index_in_cluster,
