@@ -237,6 +237,7 @@ int _pugfs_write_blocks_to_cluster_chain(
 );
 
 // utility functions
+static int _pugfs_path_is_valid(PUGFS *fs, PATH *path); // 1 on valid, 0 on invalid
 static int _pugfs_get_dir_entry_stats(const struct pugfs_dir_entry *entry, struct pugfs_filestat *out);
 static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir); // 1 if empty, 0 if not, <0 on error
 static int _pugfs_copy_dir_contents_rec(PUGFS *fs, const struct pugfs_dir_entry *src, const struct pugfs_dir_entry *dst);
@@ -408,6 +409,8 @@ void pugfs_destroy(PUGFS *fs) {
 
 int pugfs_touch(PUGFS *fs, PATH *path) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     uint32_t index_in_cluster = 0, cluster_index = 0;
@@ -428,6 +431,8 @@ int pugfs_touch(PUGFS *fs, PATH *path) {
 
 int pugfs_delete(PUGFS *fs, PATH *path) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     uint32_t index_in_cluster = 0, cluster_index = 0;
@@ -460,6 +465,8 @@ int pugfs_delete(PUGFS *fs, PATH *path) {
 
 int pugfs_trunc(PUGFS *fs, PATH *path, uint64_t new_size) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     if (fs->params.bytes_per_cluster == 0 || fs->params.data_clusters == 0)
         return -1;
@@ -536,6 +543,8 @@ int pugfs_trunc(PUGFS *fs, PATH *path, uint64_t new_size) {
 
 int pugfs_mkdir(PUGFS *fs, PATH *path) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     uint32_t index_in_cluster = 0, cluster_index = 0;
@@ -550,6 +559,8 @@ int pugfs_mkdir(PUGFS *fs, PATH *path) {
 
 int pugfs_rmdir(PUGFS *fs, PATH *path) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     // do not remove the root dir (unless?? jk)
     PATH_TOKEN *tok = path_get_first_token(path);
@@ -593,6 +604,8 @@ int pugfs_rmdir(PUGFS *fs, PATH *path) {
 
 int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
     if (!fs || !src || !dst) return -1;
+    if (!_pugfs_path_is_valid(fs, src) || !_pugfs_path_is_valid(fs, dst))
+        return -1;
 
     // check if paths are equal
     if (path_equals(src, dst) == 1) {
@@ -694,6 +707,8 @@ int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
 
 int pugfs_move(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
     if (!fs || !src || !dst) return -1;
+    if (!_pugfs_path_is_valid(fs, src) || !_pugfs_path_is_valid(fs, dst))
+        return -1;
 
     // check if paths are equal
     if (path_equals(src, dst) == 1) {
@@ -780,6 +795,8 @@ int pugfs_move(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
 
 int pugfs_lsdir_begin(PUGFS *fs, PATH *path) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, NULL, NULL);
@@ -827,6 +844,8 @@ int pugfs_lsdir_next(PUGFS *fs, struct pugfs_filestat *stat_out) {
 
 pugfs_fd pugfs_fopen(PUGFS *fs, PATH *path, pugfs_file_mode_t mode) {
     if (!fs || !path) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     uint32_t cluster_index = 0, index_in_cluster = 0;
@@ -846,6 +865,8 @@ int pugfs_fclose(PUGFS *fs, pugfs_fd fd) {
 
 int pugfs_fstat(PUGFS *fs, PATH *path, struct pugfs_filestat *stat_out) {
     if (!fs || !path || !stat_out) return -1;
+    if (!_pugfs_path_is_valid(fs, path))
+        return -1;
 
     struct pugfs_dir_entry entry;
     int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, NULL, NULL);
@@ -1081,7 +1102,12 @@ static PUGFS* _pugfs_create(DISK_IMG *img) {
     // set ITER END flag in case lsdir_next is called before lsdir_begin
     _pugfs_iter_end(&fs->lsdir);
 
-    fs->drive_no = 0; // TODO: get from disk
+    fs->drive_no = disk_img_get_drive_no(img);
+    if (fs->drive_no < 0) {
+        free(fs);
+        return NULL;
+    }
+
     fs->root.type = PUGFS_DIR_ENTRY_TYPE_DIR;
     fs->root.starting_cluster_index = 1;
 
@@ -1129,8 +1155,6 @@ static int _pugfs_check_header(struct pugfs_header* header, DISK_IMG *img) {
     // verify checksum
     uint32_t checksum = _pugfs_header_checksum(header);
     if (checksum != header->checksum) return -2;
-
-    // TODO more checks
 
     return 0; // header ok
 }
@@ -1478,8 +1502,7 @@ static int _pugfs_find_dir_entry_absolute(
     uint32_t *out_cluster_index
 ) {
     if (!fs || !path || !out_entry) return -1;
-
-    // TODO: validate drive number matches between fs and path
+    if (!_pugfs_path_is_valid(fs, path)) return -1;
 
     const struct pugfs_dir_entry *parent = &fs->root;
     PATH_TOKEN *tok = path_get_first_token(path);
@@ -1654,7 +1677,7 @@ static int _pugfs_create_new_dir_entry_absolute(
     uint32_t *out_index_in_cluster,
     uint32_t *out_cluster_index
 ) {
-    if (fs->drive_no != path_get_drive_number(path))
+    if (!_pugfs_path_is_valid(fs, path))
         return -1;
 
     // get the parent path
@@ -1930,6 +1953,11 @@ int _pugfs_write_blocks_to_cluster_chain(
     }
 
     return 0;
+}
+
+static int _pugfs_path_is_valid(PUGFS *fs, PATH *path) {
+    if (!fs || !path) return 0;
+    return path_get_drive_number(path) == fs->drive_no;
 }
 
 static int _pugfs_get_dir_entry_stats(const struct pugfs_dir_entry *entry, struct pugfs_filestat *out) {

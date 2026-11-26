@@ -6,6 +6,7 @@
 
 struct disk_img
 {
+    int drive_no;
     FILE *host_file;
     uint32_t sector_size;
     uint32_t total_sectors;
@@ -19,7 +20,13 @@ struct disk_img_stream
     char *buf;
 };
 
-DISK_IMG* disk_img_open(const char *host_path, uint32_t sector_size) {
+DISK_IMG* disk_img_open(const char *host_path, uint32_t sector_size, int drive_no) {
+    if (sector_size < DISK_IMG_MIN_SECTOR_SIZE || sector_size > DISK_IMG_MAX_SECTOR_SIZE || (sector_size % DISK_IMG_MIN_SECTOR_SIZE) != 0)
+        return NULL;
+
+    if (drive_no < 0) 
+        return NULL;
+
     FILE *f = fopen(host_path, "r+");
     if (!f) {
         return NULL;
@@ -31,6 +38,7 @@ DISK_IMG* disk_img_open(const char *host_path, uint32_t sector_size) {
         return NULL;
     }
 
+    img->drive_no = drive_no;
     img->host_file = f;
     img->sector_size = sector_size;
 
@@ -52,6 +60,11 @@ void disk_img_close(DISK_IMG *img) {
         }
         free(img);
     }
+}
+
+int disk_img_get_drive_no(DISK_IMG *img) {
+    if (!img) return -1;
+    return img->drive_no;
 }
 
 int disk_img_get_sector_size(DISK_IMG *img) {

@@ -3,12 +3,16 @@
 
 #include <stdint.h>
 
+#define DISK_IMG_MIN_SECTOR_SIZE 512
+#define DISK_IMG_MAX_SECTOR_SIZE 4096
+
 typedef struct disk_img DISK_IMG;
 typedef struct disk_img_stream DISK_IMG_STREAM;
 
-DISK_IMG* disk_img_open(const char *path, uint32_t sector_size);
+DISK_IMG* disk_img_open(const char *path, uint32_t sector_size, int drive_no);
 void disk_img_close(DISK_IMG *img);
 
+int disk_img_get_drive_no(DISK_IMG *img);
 int disk_img_get_sector_size(DISK_IMG *img);
 int disk_img_get_total_sectors(DISK_IMG *img);
 

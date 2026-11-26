@@ -3,12 +3,11 @@
 #include <string.h>
 #include <ctype.h>
 
+#include "disk_img.h"
 #include "pugfs.h"
 #include "shell.h"
 
-#define MIN_SECTOR_SIZE 512
-#define MAX_SECTOR_SIZE 4096
-
+#define DEFAULT_DRIVE_NUMBER 0
 #define DEFAULT_RESERVED_SECTORS 100
 #define DEFAULT_SECTORS_PER_CLUSTER 1
 
@@ -25,12 +24,12 @@ int main(int argc, char **argv) {
     sscanf(argv[1], "%u", &sector_size);
     image_path = argv[2];
 
-    if (sector_size < MIN_SECTOR_SIZE || sector_size > MAX_SECTOR_SIZE || (sector_size % 512) != 0) {
+    if (sector_size < DISK_IMG_MIN_SECTOR_SIZE || sector_size > DISK_IMG_MAX_SECTOR_SIZE || (sector_size % DISK_IMG_MIN_SECTOR_SIZE) != 0) {
         fprintf(stderr, "Invalid sector size: %u\n", sector_size);
         exit(EXIT_FAILURE);
     }
 
-    DISK_IMG *img = disk_img_open(image_path, sector_size);
+    DISK_IMG *img = disk_img_open(image_path, sector_size, DEFAULT_DRIVE_NUMBER);
     if (!img) {
         fprintf(stderr, "Failed to open image: %s\n", image_path);
         exit(EXIT_FAILURE);
