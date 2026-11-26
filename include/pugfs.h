@@ -35,6 +35,7 @@ typedef struct pugfs PUGFS;
 
 struct pugfs_filestat
 {
+    char name[PUGFS_FILENAME_BYTES + 1];
     pugfs_file_type_t type;
     uint64_t size;
     uint32_t creation_ts;
@@ -51,9 +52,11 @@ int pugfs_delete(PUGFS *fs, PATH *path);
 int pugfs_trunc(PUGFS *fs, PATH *path, uint64_t new_size);
 int pugfs_mkdir(PUGFS *fs, PATH *path);
 int pugfs_rmdir(PUGFS *fs, PATH *path);
-int pugfs_lsdir(PUGFS *fs, PATH *path, char *list_out, int max_entries);
 int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite);
 int pugfs_move(PUGFS *fs, PATH *src, PATH *dst, int overwrite);
+
+int pugfs_lsdir_begin(PUGFS *fs, PATH *path);
+int pugfs_lsdir_next(PUGFS *fs, struct pugfs_filestat *stat_out); // return 1 if ok, 0 if EOD, <0 if error
 
 pugfs_fd pugfs_fopen(PUGFS *fs, PATH *path, pugfs_file_mode_t mode);
 int pugfs_fclose(PUGFS *fs, pugfs_fd fd);

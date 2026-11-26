@@ -15,10 +15,6 @@
 
 #define STREQ(s1, s2) (strcmp((s1), (s2)) == 0)
 
-#define MAX_LIST_ENTRIES 100
-
-static char list_buffer[MAX_LIST_ENTRIES * PUGFS_FILENAME_BYTES] = "";
-
 static char working_dir[PATH_MAX_LEN + 1] = "0:/";
 static char input_buffer[MAX_INPUT_LEN] = "";
 
@@ -197,18 +193,22 @@ static int _shell_execute_1_arg(PUGFS *fs, const char *cmd, const char *arg1) {
         PATH *p = _shell_parse_path(arg1);
         if (!p) return EXEC_ERR_GENERAL;
 
-        int res = pugfs_lsdir(fs, p, list_buffer, MAX_LIST_ENTRIES);
+        int res = pugfs_lsdir_begin(fs, p);
+        path_destroy(p);
         if (res < 0) {
-            path_destroy(p);
             return res;
         }
 
         // print the entries
-        for (int i = 0; i < res * PUGFS_FILENAME_BYTES; i += PUGFS_FILENAME_BYTES) {
-            printf("\t%s\n", list_buffer + i);
+        struct pugfs_filestat stats;
+        while ((res = pugfs_lsdir_next(fs, &stats)) == 1) {
+            printf("%x %lu %u %u %c %s\n", stats.attributes, stats.size, stats.creation_ts, 
+                stats.last_access_ts, stats.type == PUGFS_FILE_FILE ? 'F' : 'D', stats.name);
         }
-
-        path_destroy(p);
+        if (res < 0) {
+            return res;
+        }
+        
         return EXIT_SUCCESS;
     } else if (STREQ(cmd, "cd")) {
         if (!arg1) {
