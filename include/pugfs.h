@@ -36,7 +36,7 @@ typedef struct pugfs PUGFS;
 struct pugfs_filestat
 {
     pugfs_file_type_t type;
-    uint32_t size;
+    uint64_t size;
     uint32_t creation_ts;
     uint32_t last_access_ts;
     uint8_t attributes;
@@ -48,7 +48,7 @@ void pugfs_destroy(PUGFS *fs);
 
 int pugfs_touch(PUGFS *fs, PATH *path);
 int pugfs_delete(PUGFS *fs, PATH *path);
-int pugfs_trunc(PUGFS *fs, PATH *path, uint32_t new_size);
+int pugfs_trunc(PUGFS *fs, PATH *path, uint64_t new_size);
 int pugfs_mkdir(PUGFS *fs, PATH *path);
 int pugfs_rmdir(PUGFS *fs, PATH *path);
 int pugfs_lsdir(PUGFS *fs, PATH *path, char *list_out, int max_entries);

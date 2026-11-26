@@ -25,6 +25,11 @@
 
 #define PUGFS_DIR_ITERATOR_FLAG_BEGIN   0x01
 
+#define PUGFS_MAX_FILE_DESCRIPTORS  32
+
+#define PUGFS_RW_AT_CLUSTER_MODE_READ   0
+#define PUGFS_RW_AT_CLUSTER_MODE_WRITE  1
+
 // raw header format
 struct pugfs_header
 {
@@ -51,11 +56,12 @@ struct pugfs_dir_entry
     uint8_t name[PUGFS_FILENAME_BYTES];  // 32 bytes including null terminator
     uint16_t attributes;                 // 2 bytes
     uint8_t type;                        // 1 byte
-    uint32_t size;                       // 4 bytes
+    uint32_t size_lo;                    // 4 bytes
+    uint32_t size_hi;                    // 4 bytes
     uint32_t creation_ts;                // 4 bytes
     uint32_t last_access_ts;             // 4 bytes
     uint32_t starting_cluster_index;     // 4 bytes
-    uint8_t reserved[13];                // 13 bytes
+    uint8_t reserved[9];                 // 9 bytes
 } __attribute__((packed));               // total 64 bytes
 
 // commonly used pre-calculated values
@@ -67,6 +73,17 @@ struct pugfs_params
     uint32_t entries_per_cluster;
 };
 
+// information for opened files
+struct pugfs_file_descriptor
+{
+    pugfs_fd fd; // for validation
+    pugfs_file_mode_t mode;
+    uint64_t byte_pos;
+    struct pugfs_dir_entry entry;
+    uint32_t cluster_index;
+    uint32_t index_in_cluster;
+};
+
 // fs instance
 struct pugfs
 {
@@ -74,6 +91,7 @@ struct pugfs
     struct pugfs_header header;
     struct pugfs_params params;
     struct pugfs_dir_entry root;
+    struct pugfs_file_descriptor file_descriptors[PUGFS_MAX_FILE_DESCRIPTORS];
     DISK_IMG_STREAM *stream;
     char *buf;
 };
@@ -133,6 +151,14 @@ static int _pugfs_allocate_cluster(PUGFS *fs, uint32_t *cluster_out);
 static int _pugfs_free_cluster_chain(PUGFS *fs, uint32_t starting_cluster);
 static int _pugfs_copy_cluster_data(PUGFS *fs, uint32_t src_cluster, uint32_t dst_cluster);
 static int _pugfs_duplicate_cluster_chain(PUGFS *fs, uint32_t src_start_cluster, uint32_t *dst_start_cluster_out);
+static int _pugfs_get_next_cluster_in_chain(PUGFS *fs, uint32_t cluster, uint32_t *next_cluster_out);
+static int _pugfs_get_cluster_in_chain_at_byte_offset(
+    PUGFS *fs, 
+    uint32_t starting_cluster,
+    uint64_t byte_offset, 
+    uint32_t *cluster_out,
+    uint32_t *prev_cluster_out
+);
 
 // functions for comparing directory entries
 static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2);
@@ -186,12 +212,60 @@ static int _pugfs_create_new_dir_entry_absolute(    // create a new entry at an 
     uint32_t *out_cluster_index
 );
 
+// functions for reading/writing raw data clusters
+int _pugfs_rw_bytes_at_cluster(
+    PUGFS *fs, 
+    uint32_t cluster, 
+    uint32_t offset, 
+    uint32_t count, 
+    void *iobuf, 
+    uint8_t mode, // mode = 0 => read, mode = 1 => write
+    uint32_t *count_out
+);
+int _pugfs_read_blocks_from_cluster_chain(
+    PUGFS *fs, 
+    uint32_t starting_cluster,
+    uint64_t byte_offset, 
+    uint32_t bs, 
+    uint32_t count, 
+    void *out,
+    uint32_t *blocks_read
+);
+int _pugfs_write_blocks_to_cluster_chain(
+    PUGFS *fs, 
+    uint32_t starting_cluster, 
+    uint64_t byte_offset,
+    uint32_t bs, 
+    uint32_t count, 
+    const void *in,
+    uint32_t *blocks_written
+);
+
 // utility functions
 static int _pugfs_dir_is_empty(PUGFS *fs, const struct pugfs_dir_entry *dir); // 1 if empty, 0 if not, <0 on error
 static int _pugfs_copy_dir_contents_rec(PUGFS *fs, const struct pugfs_dir_entry *src, const struct pugfs_dir_entry *dst);
 static int _pugfs_iter_begin(struct pugfs_dir_iterator *iter, const struct pugfs_dir_entry *dir);
 // return 1 if has next, 0 if EOD, -1 on error, -2 on EOC (and not EOD)
 static int _pugfs_iter_next(PUGFS *fs, struct pugfs_dir_iterator *iter);
+
+// file IO functions
+static int _pugfs_alloc_fd(
+    PUGFS *fs, 
+    const struct pugfs_dir_entry *entry, 
+    pugfs_file_mode_t mode, 
+    uint32_t cluster_index, 
+    uint32_t index_in_cluster
+);
+static int _pugfs_free_fd(PUGFS *fs, pugfs_fd fd);
+
+static inline uint64_t _pugfs_get_entry_size(const struct pugfs_dir_entry *entry) {
+    return ((uint64_t)entry->size_hi << 32) | entry->size_lo;
+}
+
+static inline void _pugfs_set_entry_size(struct pugfs_dir_entry *entry, uint64_t size) {
+    entry->size_lo = (uint32_t)(size & 0xFFFFFFFF);
+    entry->size_hi = (uint32_t)(size >> 32);
+}
 
 int pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_cluster) {
     if (!img || reserved_sectors < 1 || sectors_per_cluster < 1) return -1;
@@ -240,30 +314,59 @@ int pugfs_format(DISK_IMG *img, uint32_t reserved_sectors, uint16_t sectors_per_
     fs->header.data_sectors = data_sectors;
     fs->header.root_dir_starting_index = 1; // entry 1 in FTable
     fs->header.checksum = _pugfs_header_checksum(&fs->header);
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_header), &fs->header);
+    res = disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_header), &fs->header);
+    if (res != sizeof(struct pugfs_header)) {
+        res = -4;
+        goto format_exit;
+    }
 
     // write the FTable
     memset(fs->buf, 0, disk_sector_size);
     *(uint32_t*)(fs->buf) = PUGFS_FTABLE_ENTRY_RESERVED; // entry 0, not used
     *((uint32_t*)(fs->buf) + 1) = PUGFS_FTABLE_ENTRY_EOC; // entry 1, root dir
 
-    disk_img_stream_seek(fs->stream, reserved_sectors, 0);
-    disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+    res = disk_img_stream_seek(fs->stream, reserved_sectors, 0);
+    if (res != 0) {
+        res = -5;
+        goto format_exit;
+    }
+
+    res = disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+    if (res != 1) {
+        res = -6;
+        goto format_exit;
+    }
 
     memset(fs->buf, 0, disk_sector_size);
     for (uint32_t i = 1; i < ftable_sectors; ++i) {
-        disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+        res = disk_img_stream_write_sectors(fs->stream, 1, fs->buf);
+        if (res != 1) {
+            res = -7;
+            goto format_exit;
+        }
     }
     
     // write EOD to root dir (at cluster 1 from the data area)
     struct pugfs_dir_entry eod;
     memset(&eod, 0, sizeof(struct pugfs_dir_entry));
     eod.type = PUGFS_DIR_ENTRY_TYPE_EOD;
-    disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
-    disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
 
+    res = disk_img_stream_seek(fs->stream, reserved_sectors + ftable_sectors, 0);
+    if (res != 0) {
+        res = -5;
+        goto format_exit;
+    }
+
+    res = disk_img_stream_write_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &eod);
+    if (res != sizeof(struct pugfs_dir_entry)) {
+        res = -6;
+        goto format_exit;
+    }
+
+    res = 0; // mark success
+format_exit:
     pugfs_destroy(fs);
-    return 0;
+    return res;
 }
 
 PUGFS* pugfs_mount(DISK_IMG *img) {
@@ -273,7 +376,11 @@ PUGFS* pugfs_mount(DISK_IMG *img) {
     if (!fs) return NULL;
 
     // read boot sector
-    disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
+    int res = disk_img_stream_read_sectors(fs->stream, 1, fs->buf);
+    if (res != 1) {
+        pugfs_destroy(fs);
+        return NULL;
+    }
 
     // copy header
     memcpy(&fs->header, fs->buf, sizeof(struct pugfs_header));
@@ -354,8 +461,11 @@ int pugfs_delete(PUGFS *fs, PATH *path) {
     return 0;
 }
 
-int pugfs_trunc(PUGFS *fs, PATH *path, uint32_t new_size) {
+int pugfs_trunc(PUGFS *fs, PATH *path, uint64_t new_size) {
     if (!fs || !path) return -1;
+
+    if (fs->params.bytes_per_cluster == 0 || fs->params.data_clusters == 0)
+        return -1;
 
     struct pugfs_dir_entry entry;
     uint32_t index_in_cluster = 0, cluster_index = 0;
@@ -370,56 +480,58 @@ int pugfs_trunc(PUGFS *fs, PATH *path, uint32_t new_size) {
         return -2; // not a file
     }
 
+    uint64_t entry_size = _pugfs_get_entry_size(&entry);
+
     // ensure file size is larger than new size
-    if (entry.size <= new_size) {
+    if (entry_size <= new_size) {
         return 1; // nothing to do
     }
 
-    uint32_t bytes_per_cluster = fs->header.sector_size * fs->header.sectors_per_cluster;
-    if (entry.size <= bytes_per_cluster) {
-        return -10; // nothing to do, min file size is 1 cluster
-    }
-    uint32_t file_clusters = entry.size / bytes_per_cluster;
-    if (entry.size % bytes_per_cluster != 0) {  // round up to next cluster
-        ++file_clusters;
-    }
-
-    uint32_t new_file_clusters = new_size / bytes_per_cluster;
-    if (new_size % bytes_per_cluster != 0) {  // round up to next cluster
+    uint64_t new_file_clusters = new_size / fs->params.bytes_per_cluster;
+    if (new_size % fs->params.bytes_per_cluster != 0) {  // round up to next cluster
         ++new_file_clusters;
     }
 
+    // files should have at least 1 allocated cluster
+    if (new_file_clusters == 0) {
+        new_file_clusters = 1;
+    }
+
     uint32_t cluster = entry.starting_cluster_index;
+    if (cluster < 1 || cluster > fs->params.data_clusters)
+        return -3;
+
     for (uint32_t i = 1; i < new_file_clusters; ++i) {
         cluster = _pugfs_read_ftable_entry(fs, cluster);
-        if (cluster == PUGFS_FTABLE_ENTRY_EOC || cluster == PUGFS_FTABLE_ENTRY_INVALID) {
-            return -3; 
-        }
+
+        if (cluster < 1 || cluster > fs->params.data_clusters)
+            return -3;
     }
 
     uint32_t next_cluster = _pugfs_read_ftable_entry(fs, cluster);
-
-    if (next_cluster == PUGFS_FTABLE_ENTRY_INVALID ||
-        next_cluster == PUGFS_FTABLE_ENTRY_FREE ||
-        next_cluster == PUGFS_FTABLE_ENTRY_RESERVED ||
-        next_cluster == PUGFS_FTABLE_ENTRY_BAD) {
+    if (next_cluster != PUGFS_FTABLE_ENTRY_EOC &&
+        (next_cluster < 1 || next_cluster > fs->params.data_clusters))
         return -3;
+
+    // terminate retained chain
+    res = _pugfs_write_ftable_entry(fs, cluster, PUGFS_FTABLE_ENTRY_EOC);
+    if (res != 0) {
+        return -4; // failed to update ftable entry
     }
 
-    // update entry size and write it back
-    entry.size = new_size;
+    // update logical entry size and write it back
+    _pugfs_set_entry_size(&entry, new_size);
     res = _pugfs_write_dir_entry_to_data_cluster(fs, cluster_index, index_in_cluster, &entry);
     if (res != 0) {
         return -6; // failed to update entry
     }
 
-    res = _pugfs_write_ftable_entry(fs, cluster, PUGFS_FTABLE_ENTRY_EOC);
-    if (res != 0) {
-        return -4; // failed to update ftable entry
-    }
-    res = _pugfs_free_cluster_chain(fs, next_cluster);
-    if (res != 0) {
-        return -5; // failed to free cluster chain
+    // release remainder of chain
+    if (next_cluster != PUGFS_FTABLE_ENTRY_EOC) {
+        res = _pugfs_free_cluster_chain(fs, next_cluster);
+        if (res != 0) {
+            return -5; // failed to free cluster chain
+        }
     }
 
     return 0;
@@ -564,7 +676,8 @@ int pugfs_copy(PUGFS *fs, PATH *src, PATH *dst, int overwrite) {
     dst_entry.attributes = src_entry.attributes;
     dst_entry.creation_ts = src_entry.creation_ts;
     memcpy(dst_entry.reserved, src_entry.reserved, sizeof(dst_entry.reserved));
-    dst_entry.size = src_entry.size;
+    dst_entry.size_lo = src_entry.size_lo;
+    dst_entry.size_hi = src_entry.size_hi;
     dst_entry.last_access_ts = 1; // TODO: set to now
 
     // if copying a file, it's easy
@@ -693,29 +806,193 @@ pugfs_fd pugfs_fopen(PUGFS *fs, PATH *path, pugfs_file_mode_t mode) {
     if (!fs || !path) return -1;
 
     struct pugfs_dir_entry entry;
-    int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, NULL, NULL);
+    uint32_t cluster_index = 0, index_in_cluster = 0;
+    int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, &index_in_cluster, &cluster_index);
+    if (res != 0) return res;
 
-    return -1;
+    if (entry.type != PUGFS_DIR_ENTRY_TYPE_FILE)
+        return -2; // can only open files
+
+    return _pugfs_alloc_fd(fs, &entry, mode, cluster_index, index_in_cluster);
 }
 
 int pugfs_fclose(PUGFS *fs, pugfs_fd fd) {
-    return -1;
+    if (!fs || fd < 1 || fd > PUGFS_MAX_FILE_DESCRIPTORS) return -1;
+    return _pugfs_free_fd(fs, fd);
 }
 
 int pugfs_fstat(PUGFS *fs, PATH *path, struct pugfs_filestat *stat_out) {
-    return -1;
+    if (!fs || !path || !stat_out) return -1;
+
+    struct pugfs_dir_entry entry;
+    int res = _pugfs_find_dir_entry_absolute(fs, path, &entry, NULL, NULL);
+    if (res != 0) return res;
+
+    if (entry.type != PUGFS_DIR_ENTRY_TYPE_DIR && entry.type != PUGFS_DIR_ENTRY_TYPE_FILE)
+        return -2; // bad type
+
+    // write stats
+    memset(stat_out, 0, sizeof(*stat_out));
+    stat_out->creation_ts = entry.creation_ts;
+    stat_out->last_access_ts = entry.last_access_ts;
+    stat_out->attributes = entry.attributes;
+    stat_out->size = _pugfs_get_entry_size(&entry);
+    stat_out->type = (entry.type == PUGFS_DIR_ENTRY_TYPE_FILE) ? PUGFS_FILE_FILE : PUGFS_FILE_DIR;
+
+    return 0;
 }
 
 int pugfs_fseek(PUGFS *fs, pugfs_fd fd, int offset, pugfs_seek_mode_t whence) {
-    return -1;
+    if (!fs || fd < 1 || fd > PUGFS_MAX_FILE_DESCRIPTORS)
+        return -1;
+
+    struct pugfs_file_descriptor *desc = &fs->file_descriptors[(int)fd - 1];
+    if (desc->fd != fd) return -2;
+
+    uint64_t entry_size = _pugfs_get_entry_size(&desc->entry);
+    uint64_t new_pos = 0;
+
+    switch (whence) {
+        case PUGFS_SEEK_SET:
+            new_pos = offset;
+            break;
+
+        case PUGFS_SEEK_CUR:
+            new_pos = desc->byte_pos + offset;
+            break;
+
+        case PUGFS_SEEK_END:
+            new_pos = entry_size + offset;
+            break;
+
+        default:
+            return -1;
+    }
+
+    if (new_pos > entry_size)
+        return -3;
+
+    desc->byte_pos = new_pos;
+    return 0;
 }
 
 size_t pugfs_fread(PUGFS *fs, void *dst, size_t size, size_t nmemb, pugfs_fd fd) {
-    return 0;
+    if (!fs || !dst || fd < 1 || fd > PUGFS_MAX_FILE_DESCRIPTORS)
+        return 0;
+
+    struct pugfs_file_descriptor *desc = &fs->file_descriptors[(int)fd - 1];
+    if (desc->fd != fd) return 0;
+
+    if (desc->mode != PUGFS_FILE_MODE_READ && desc->mode != PUGFS_FILE_MODE_READWRITE)
+        return 0; // not allowed
+    
+    if (size == 0 || nmemb == 0)
+        return 0; // nothing to read
+
+    if (nmemb > SIZE_MAX / size)
+        return 0;
+
+    if (size > UINT32_MAX || nmemb > UINT32_MAX)
+        return 0;
+
+    uint64_t file_size = _pugfs_get_entry_size(&desc->entry);
+    if (desc->byte_pos >= file_size)
+        return 0;
+
+    size_t total_bytes = size * nmemb;
+    uint64_t remaining = file_size - desc->byte_pos;
+    if (total_bytes > remaining) {
+        total_bytes = remaining;
+    }
+
+    size_t blocks_to_read = total_bytes / size;
+    if (blocks_to_read == 0)
+        return 0;
+
+
+    uint32_t blocks_read = 0;
+    int res = _pugfs_read_blocks_from_cluster_chain(
+        fs, 
+        desc->entry.starting_cluster_index, 
+        desc->byte_pos, 
+        size,
+        blocks_to_read,
+        dst,
+        &blocks_read
+    );
+
+    desc->byte_pos += blocks_read * size;
+
+    if (res != 0)
+        return blocks_read;
+
+    return blocks_read;
 }
 
 size_t pugfs_fwrite(PUGFS *fs, const void *src, size_t size, size_t nmemb, pugfs_fd fd) {
-    return 0;
+    if (!fs || !src || fd < 1 || fd > PUGFS_MAX_FILE_DESCRIPTORS)
+        return -1;
+
+    struct pugfs_file_descriptor *desc = &fs->file_descriptors[(int)fd - 1];
+    if (desc->fd != fd) return 0;
+
+    if (desc->mode != PUGFS_FILE_MODE_WRITE && desc->mode != PUGFS_FILE_MODE_READWRITE
+        && desc->mode != PUGFS_FILE_MODE_APPEND)
+        return 0; // not allowed
+    
+    if (size == 0 || nmemb == 0)
+        return 0; // nothing to write
+
+    if (nmemb > SIZE_MAX / size)
+        return 0;
+
+    if (size > UINT32_MAX || nmemb > UINT32_MAX)
+        return 0;
+
+    size_t total_bytes = size * nmemb;
+    uint64_t write_pos = desc->byte_pos;
+
+    if (desc->mode == PUGFS_FILE_MODE_APPEND)
+        write_pos = _pugfs_get_entry_size(&desc->entry);
+
+    // check end-position overflow
+    if (write_pos > UINT64_MAX - total_bytes)
+        return 0;
+
+    uint32_t blocks_written = 0;
+    int res = _pugfs_write_blocks_to_cluster_chain(
+        fs,
+        desc->entry.starting_cluster_index,
+        write_pos,
+        size,
+        nmemb,
+        src,
+        &blocks_written
+    );
+
+    uint64_t bytes_written = (uint64_t)blocks_written * size;
+    uint64_t new_end = write_pos + bytes_written;
+
+    // update logical file size if the file grew
+    uint64_t old_size = _pugfs_get_entry_size(&desc->entry);
+    if (new_end > old_size) {
+        _pugfs_set_entry_size(&desc->entry, new_end);
+        res = _pugfs_write_dir_entry_to_data_cluster(
+            fs,
+            desc->cluster_index,
+            desc->index_in_cluster,
+            &desc->entry
+        );
+        if (res < 0)
+            return 0;
+    }
+
+    desc->byte_pos = new_end;
+
+    if (res != 0)
+        return blocks_written;
+
+    return blocks_written;
 }
 
 static uint32_t _pugfs_header_checksum(struct pugfs_header *header) {
@@ -1045,6 +1322,83 @@ rollback:
     return -1;
 }
 
+static int _pugfs_get_next_cluster_in_chain(PUGFS *fs, uint32_t cluster, uint32_t *next_cluster_out) {
+    if (!fs) return -1;
+
+    if (fs->header.sectors_per_cluster == 0 || fs->header.sector_size == 0 || fs->params.data_clusters == 0)
+        return -1;  // bad fs
+
+    if (cluster < 1 || cluster > fs->params.data_clusters)
+        return -1;  // out of bounds cluster
+
+    uint32_t ftable_entry = _pugfs_read_ftable_entry(fs, cluster);
+
+    if (ftable_entry == PUGFS_FTABLE_ENTRY_RESERVED ||
+        ftable_entry == PUGFS_FTABLE_ENTRY_INVALID ||
+        ftable_entry == PUGFS_FTABLE_ENTRY_BAD ||
+        ftable_entry == PUGFS_FTABLE_ENTRY_FREE)
+        return -1;  // bad FTABLE
+    
+    if (ftable_entry == PUGFS_FTABLE_ENTRY_EOC)
+        return 0; // reached end of chain
+
+    if (ftable_entry < 1 || ftable_entry > fs->params.data_clusters)
+        return -1; // next cluster out of bounds
+
+    if (next_cluster_out) {
+        *next_cluster_out = ftable_entry;
+    }
+
+    return 1; // there is a next cluster
+}
+
+static int _pugfs_get_cluster_in_chain_at_byte_offset(
+    PUGFS *fs, 
+    uint32_t starting_cluster,
+    uint64_t byte_offset, 
+    uint32_t *cluster_out,
+    uint32_t *prev_cluster_out
+) {
+    if (!fs || !cluster_out) return -1;
+
+    if (fs->params.bytes_per_cluster == 0 || fs->params.data_clusters == 0)
+        return -1;
+
+    if (starting_cluster < 1 || starting_cluster > fs->params.data_clusters)
+        return -1;
+
+    if (prev_cluster_out) {
+        *prev_cluster_out = 0;
+    }
+
+    // traverse the chain to the cluster containing byte_offset
+    uint32_t cluster = starting_cluster;
+    uint64_t cluster_offset = byte_offset / fs->params.bytes_per_cluster;
+    for (uint64_t i = 0; i < cluster_offset; ++i) {
+        uint32_t next_cluster = 0;
+
+        if (prev_cluster_out) {
+            *prev_cluster_out = cluster;
+        }
+
+        int res = _pugfs_get_next_cluster_in_chain(fs, cluster, &next_cluster);
+        if (res < 0)
+            return -1;
+
+        if (res == 0) { // EOC
+            // the requested position is beyond the chain or exactly at its end
+            if (byte_offset == (i + 1) * (uint64_t)fs->params.bytes_per_cluster)
+                return 1;
+            return -1;
+        }
+
+        cluster = next_cluster;
+    }
+
+    *cluster_out = cluster;
+    return 0;
+}
+
 static int _pugfs_compare_dir_entries_by_name(const struct pugfs_dir_entry *e1, const struct pugfs_dir_entry *e2) {
     if (!e1 || !e2) return -1;
     if (e1->type == PUGFS_DIR_ENTRY_TYPE_FREE) return -1;
@@ -1338,15 +1692,13 @@ static int _pugfs_create_new_dir_entry_absolute(
     struct pugfs_dir_entry new_entry;
     memset(&new_entry, 0, sizeof(struct pugfs_dir_entry));
     new_entry.type = type;
-    new_entry.size = 0;
+    new_entry.size_lo = 0;
+    new_entry.size_hi = 0;
     new_entry.creation_ts = 0; // TODO: set to current timestamp
     new_entry.last_access_ts = 0; // TODO: set to current timestamp
     new_entry.starting_cluster_index = 0; // will be allocated later
     new_entry.attributes = 0; // no special attributes
     strncpy((char*)new_entry.name, new_entry_name, PUGFS_FILENAME_BYTES - 1);
-    if (type == PUGFS_DIR_ENTRY_TYPE_FILE) {
-        new_entry.size = fs->header.sectors_per_cluster * fs->header.sector_size; // size of one cluster for a new file
-    }
 
     // find the parent dir
     struct pugfs_dir_entry parent_dir_entry;
@@ -1364,6 +1716,239 @@ static int _pugfs_create_new_dir_entry_absolute(
     // propagate the new entry to the caller
     if (out_entry) {
         memcpy(out_entry, &new_entry, sizeof(struct pugfs_dir_entry));
+    }
+
+    return 0;
+}
+
+int _pugfs_rw_bytes_at_cluster(
+    PUGFS *fs, 
+    uint32_t cluster, 
+    uint32_t offset, 
+    uint32_t count, 
+    void *iobuf, 
+    uint8_t mode,
+    uint32_t *count_out
+) {
+    if (!fs || !iobuf || !fs->stream) return -1;
+    
+    if (fs->header.sector_size == 0 ||
+        fs->header.sectors_per_cluster == 0 ||
+        fs->params.bytes_per_cluster == 0 ||
+        fs->params.data_clusters == 0)
+        return -1; // bad fs
+
+    if (cluster < 1 || cluster > fs->params.data_clusters)
+        return -1;  // out of bounds cluster
+
+    if (count == 0) return 0; // nothing to read
+
+    if (offset > fs->params.bytes_per_cluster || count > fs->params.bytes_per_cluster - offset)
+        return -1;
+
+    if (count > INT32_MAX)
+        return -1;
+
+    // set stream position to the first sector of the cluster
+    uint64_t sector = (uint64_t)fs->header.data_start_sector + (uint64_t)(cluster - 1) * fs->header.sectors_per_cluster;
+
+    if (sector > UINT32_MAX)
+        return -1;
+
+    int res = disk_img_stream_seek(fs->stream, sector, 0);
+    if (res < 0) return -1; // disk seek error
+    
+    // advance stream to offset across sector boundaries
+    disk_img_stream_advance(fs->stream, offset);
+
+    // read or write 'count' bytes
+    if (mode == PUGFS_RW_AT_CLUSTER_MODE_READ) {
+        res = disk_img_stream_read_bytes(fs->stream, count, iobuf);
+    } else if (mode == PUGFS_RW_AT_CLUSTER_MODE_WRITE) {
+        res = disk_img_stream_write_bytes(fs->stream, count, iobuf);
+    } else {
+        return -1; // invalid mode
+    }
+
+    if (res < 0) {
+        return -1; // read/write error
+    }
+
+    if (count_out) {
+        *count_out = (uint32_t)res;
+    }
+    
+    if ((uint32_t)res != count)
+        return -2; // less bytes than requested
+
+    return 0;
+}
+
+int _pugfs_read_blocks_from_cluster_chain(
+    PUGFS *fs,
+    uint32_t starting_cluster,
+    uint64_t byte_offset, 
+    uint32_t bs, 
+    uint32_t count, 
+    void *out,
+    uint32_t *blocks_read
+) {
+    if (!fs || !out) return -1;
+
+    if (fs->header.sector_size == 0 ||
+        fs->header.sectors_per_cluster == 0 ||
+        fs->params.bytes_per_cluster == 0 ||
+        fs->params.data_clusters == 0)
+        return -1; // bad fs
+
+    if (blocks_read) {
+        *blocks_read = 0;
+    }
+
+    if (bs == 0 || count == 0) return 0; // nothing to read
+
+    // validate starting cluster
+    if (starting_cluster < 1 || starting_cluster > fs->params.data_clusters)
+        return -1;
+
+    // find cluster containing the byte offset
+    uint32_t cluster = 0;
+    int res = _pugfs_get_cluster_in_chain_at_byte_offset(fs, starting_cluster, byte_offset, &cluster, NULL);
+    if (res != 0)
+        return -1;
+
+    // calculate the remaining offset within the found cluster
+    uint32_t offset = byte_offset % fs->params.bytes_per_cluster;
+
+    // read 'count' blocks of size 'bs'
+    uint8_t *outc = out;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t bytes_remaining = bs;
+    
+        while (bytes_remaining > 0) {
+            // calculate how many bytes can be read from this cluster
+            uint32_t available = fs->params.bytes_per_cluster - offset;
+
+            uint32_t bytes_to_read = bytes_remaining < available ? bytes_remaining : available;
+
+            res = _pugfs_rw_bytes_at_cluster(fs, cluster, offset, bytes_to_read, outc, PUGFS_RW_AT_CLUSTER_MODE_READ, NULL);
+            if (res != 0)
+                return -1;
+
+            outc += bytes_to_read;
+            bytes_remaining -= bytes_to_read;
+            offset += bytes_to_read;
+
+            if (bytes_remaining > 0) {
+                // move to the next cluster in the chain
+                uint32_t next_cluster = 0;
+                res = _pugfs_get_next_cluster_in_chain(fs, cluster, &next_cluster);
+                if (res != 1)
+                    return -1; // EOC or corrupt chain
+
+                cluster = next_cluster;
+                offset = 0;
+            }
+        }
+
+        if (blocks_read) {
+            *blocks_read = i + 1;
+        }
+    }
+
+    return 0;
+}
+
+int _pugfs_write_blocks_to_cluster_chain(
+    PUGFS *fs, 
+    uint32_t starting_cluster,
+    uint64_t byte_offset, 
+    uint32_t bs, 
+    uint32_t count, 
+    const void *in,
+    uint32_t *blocks_written
+) {
+    if (!fs || !in) return -1;
+
+    if (fs->header.sector_size == 0 ||
+        fs->header.sectors_per_cluster == 0 ||
+        fs->params.bytes_per_cluster == 0 ||
+        fs->params.data_clusters == 0)
+        return -1; // bad fs
+
+    if (blocks_written) {
+        *blocks_written = 0;
+    }
+
+    if (bs == 0 || count == 0) return 0; // nothing to read
+
+    // validate starting cluster
+    if (starting_cluster < 1 || starting_cluster > fs->params.data_clusters)
+        return -1;
+
+    // find cluster containing the byte offset
+    uint32_t cluster = 0, prev_cluster = 0;
+    int res = _pugfs_get_cluster_in_chain_at_byte_offset(fs, starting_cluster, byte_offset, &cluster, &prev_cluster);
+    if (res < 0)
+        return -1;
+
+    if (res == 1) { // offset is at EOC
+        // allocate a new cluster (for append)
+        res = _pugfs_allocate_cluster(fs, &cluster);
+        if (res != 0) return res;
+
+        // update the FTable entry for the previous cluster to point to the new cluster
+        res = _pugfs_write_ftable_entry(fs, prev_cluster, cluster);
+        if (res != 0) return res;
+    }
+
+    // calculate the remaining offset within the found cluster
+    uint32_t offset = byte_offset % fs->params.bytes_per_cluster;
+
+    // write 'count' blocks of size 'bs'
+    uint8_t *inc = in;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t bytes_remaining = bs;
+
+        while (bytes_remaining > 0) {
+            // calculate how many bytes can be read from this cluster
+            uint32_t available = fs->params.bytes_per_cluster - offset;
+
+            uint32_t bytes_to_write = bytes_remaining < available ? bytes_remaining : available;
+
+            res = _pugfs_rw_bytes_at_cluster(fs, cluster, offset, bytes_to_write, inc, PUGFS_RW_AT_CLUSTER_MODE_WRITE, NULL);
+            if (res != 0)
+                return -1;
+
+            inc += bytes_to_write;
+            bytes_remaining -= bytes_to_write;
+            offset += bytes_to_write;
+
+            if (bytes_remaining > 0) {
+                // move to the next cluster in the chain
+                uint32_t next_cluster = 0;
+                res = _pugfs_get_next_cluster_in_chain(fs, cluster, &next_cluster);
+                if (res < 0)
+                    return -1; // error or corrupt chain
+
+                if (res == 0) { // EOC
+                    // need to allocate a new cluster
+                    res = _pugfs_allocate_cluster(fs, &next_cluster);
+                    if (res != 0) return res;
+
+                    // update the FTable entry for the current cluster to point to the new cluster
+                    res = _pugfs_write_ftable_entry(fs, cluster, next_cluster);
+                    if (res != 0) return res;
+                }
+
+                cluster = next_cluster;
+                offset = 0;
+            }
+        }
+
+        if (blocks_written) {
+            *blocks_written = i + 1;
+        }
     }
 
     return 0;
@@ -1496,22 +2081,15 @@ static int _pugfs_iter_next(PUGFS *fs, struct pugfs_dir_iterator *iter) {
     }
 
     if (iter->_next_cluster_index < 1 || iter->_next_cluster_index > fs->params.data_clusters)
-        return -1;  // out of bounds cluster
-
-    uint32_t ftable_entry = _pugfs_read_ftable_entry(fs, iter->_next_cluster_index);
-
-    if (ftable_entry == PUGFS_FTABLE_ENTRY_RESERVED ||
-        ftable_entry == PUGFS_FTABLE_ENTRY_INVALID ||
-        ftable_entry == PUGFS_FTABLE_ENTRY_BAD ||
-        ftable_entry == PUGFS_FTABLE_ENTRY_FREE)
-        return -1;  // bad FTABLE
+        return -1; // cluster oub
 
     uint64_t sector = (uint64_t)fs->header.data_start_sector + (uint64_t)(iter->_next_cluster_index - 1) * fs->header.sectors_per_cluster;
-    uint64_t offset = (uint64_t)iter->_next_index_in_cluster * sizeof(struct pugfs_dir_entry);
-
     memset(&iter->current, 0, sizeof(iter->current));
-    int res = disk_img_stream_seek(fs->stream, sector, offset);
+    int res = disk_img_stream_seek(fs->stream, sector, 0);
     if (res < 0) return -1; // disk seek error
+    
+    // advance stream across sector boundaries
+    disk_img_stream_advance(fs->stream, iter->_next_index_in_cluster * sizeof(struct pugfs_dir_entry));
 
     res = disk_img_stream_read_bytes(fs->stream, sizeof(struct pugfs_dir_entry), &iter->current);
     if (res != sizeof(struct pugfs_dir_entry))
@@ -1529,11 +2107,13 @@ static int _pugfs_iter_next(PUGFS *fs, struct pugfs_dir_iterator *iter) {
     if (iter->_next_index_in_cluster >= fs->params.entries_per_cluster) {
         iter->_next_index_in_cluster = 0;
 
-        if (ftable_entry == PUGFS_FTABLE_ENTRY_EOC)
-            return -2; // directory lacks EOD
+        uint32_t ftable_entry = 0;
+        res = _pugfs_get_next_cluster_in_chain(fs, iter->_next_cluster_index, &ftable_entry);
+        if (res < 0) 
+            return -1; // bad next cluster
 
-        if (ftable_entry < 1 || ftable_entry > fs->params.data_clusters)
-            return -1; // cluster out of bounds
+        if (res == 0)
+            return -2; // encountered EOC and directory lacks EOD
 
         if (iter->_clusters_visited >= fs->params.data_clusters)
             return -1; // cycle / excessively long chain
@@ -1543,4 +2123,41 @@ static int _pugfs_iter_next(PUGFS *fs, struct pugfs_dir_iterator *iter) {
     }
 
     return 1; // there is a next entry
+}
+
+static int _pugfs_alloc_fd(
+    PUGFS *fs, 
+    const struct pugfs_dir_entry *entry, 
+    pugfs_file_mode_t mode, 
+    uint32_t cluster_index, 
+    uint32_t index_in_cluster
+) {
+    if (!fs || !entry) return -1;
+    struct pugfs_file_descriptor *desc = NULL;
+    for (int i = 0; i < PUGFS_MAX_FILE_DESCRIPTORS; ++i) {
+        desc = &fs->file_descriptors[i];
+        if (desc->fd <= 0) {
+            // found free descriptor
+            desc->byte_pos = 0;
+            desc->mode = mode;
+            desc->fd = (pugfs_fd)(i + 1); // fd's start at 1
+            desc->cluster_index = cluster_index;
+            desc->index_in_cluster = index_in_cluster;
+            memcpy(&desc->entry, entry, sizeof(desc->entry));
+            return i + 1;
+        }
+    }
+
+    return 0; // no free descriptors
+}
+
+static int _pugfs_free_fd(PUGFS *fs, pugfs_fd fd) {
+    if (!fs || fd < 1 || fd > PUGFS_MAX_FILE_DESCRIPTORS) return -1;
+    struct pugfs_file_descriptor *desc = &fs->file_descriptors[(int)fd - 1];
+    if (desc->fd == fd) {
+        // descriptor is valid and allocated
+        desc->fd = 0;
+        return 0; // success
+    }
+    return -1; // error
 }

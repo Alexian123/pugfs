@@ -57,11 +57,12 @@ struct pugfs_dir_entry
     uint8_t name[PUGFS_FILENAME_BYTES];  // 32 bytes including null terminator
     uint16_t attributes;                 // 2 bytes
     uint8_t type;                        // 1 byte
-    uint32_t size;                       // 4 bytes
+    uint32_t size_lo;                    // 4 bytes
+    uint32_t size_hi;                    // 4 bytes
     uint32_t creation_ts;                // 4 bytes
     uint32_t last_access_ts;             // 4 bytes
     uint32_t starting_cluster_index;     // 4 bytes
-    uint8_t reserved[13];                // 13 bytes
+    uint8_t reserved[9];                 // 9 bytes
 } __attribute__((packed));               // total 64 bytes
 ```
 
