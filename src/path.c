@@ -102,6 +102,18 @@ PATH* path_parse_relative(PATH *root, const char *path) {
     return p;
 }
 
+PATH* path_get_parent_path(PATH *p) {
+    if (!p || p->length <= 0) return NULL;
+
+    PATH *parent = (PATH*)malloc(sizeof(*p));
+    if (!parent) return NULL;
+
+    memcpy(parent, p, sizeof(*p));
+    --(parent->length); 
+
+    return parent;
+}
+
 void path_destroy(PATH *p) {
     if (!p) return;
     free(p);
@@ -173,18 +185,6 @@ int path_is_child_of(PATH *p1, PATH *p2) {
     }
 
     return 1;
-}
-
-PATH* path_get_parent_path(PATH *p) {
-    if (!p || p->length <= 0) return NULL;
-
-    PATH *parent = (PATH*)malloc(sizeof(*p));
-    if (!parent) return NULL;
-
-    memcpy(parent, p, sizeof(*p));
-    --(parent->length); 
-
-    return parent;
 }
 
 int path_get_drive_number(PATH *p) {

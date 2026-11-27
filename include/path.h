@@ -11,9 +11,14 @@ typedef struct path PATH;
 typedef struct path_token PATH_TOKEN;
 
 int path_is_valid(const char *path);
+
+// these will allocate memory for a new path
 PATH* path_parse(const char *path);
 PATH* path_parse_relative(PATH *root, const char *path);
+PATH* path_get_parent_path(PATH *p);
+
 void path_destroy(PATH *p);
+
 int path_to_string(PATH *p, char *out);
 
 /*
@@ -29,9 +34,6 @@ int path_equals(PATH *p1, PATH *p2);
     -1: Invalid arguments.
 */
 int path_is_child_of(PATH *p1, PATH *p2);
-
-// will allocate memory for a new path
-PATH* path_get_parent_path(PATH *p);
 
 int path_get_drive_number(PATH *p);
 int path_get_number_of_tokens(PATH *p);

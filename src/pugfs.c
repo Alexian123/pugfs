@@ -91,6 +91,7 @@ struct pugfs_file_descriptor
         - allocate an iter object
         - call iter_begin once
         - call iter_next repeatedly
+        - call iter_end to cause iter_next to return an error on subsequent calls
 */
 struct pugfs_dir_iterator
 {
@@ -99,10 +100,10 @@ struct pugfs_dir_iterator
     uint32_t current_cluster_index;         // cluster index of current entry (for writing back)
     uint32_t current_index_in_cluster;      // index in cluster of current entry (for writing back)
 
-    // private fields - should not be accessed outside of iter_begin/iter_next
-    struct pugfs_dir_entry _parent;         // set inside iter_begin
-    uint8_t _flags;                         // set inside iter_begin or iter_end
-    uint32_t _clusters_visited;             // counts visited clusters to prevent infinite loops in case of corrupted chains
+    // private fields - should not be accessed outside of iter_begin/iter_next/iter_end
+    struct pugfs_dir_entry _parent;         // set inside iter_begin, represents parent dir
+    uint8_t _flags;                         // set inside iter_begin/iter_end, control flags
+    uint32_t _clusters_visited;             // count visited clusters to prevent infinite loops in case of a circular chain
     uint32_t _next_cluster_index;           // cluster index for next iteration
     uint32_t _next_index_in_cluster;        // index in cluster for next iteration
 };
@@ -115,7 +116,7 @@ struct pugfs
     struct pugfs_params params;
     struct pugfs_dir_entry root;
     struct pugfs_file_descriptor file_descriptors[PUGFS_MAX_FILE_DESCRIPTORS];
-    struct pugfs_dir_iterator lsdir;    // for lsdir function
+    struct pugfs_dir_iterator lsdir;    // for lsdir functions
     DISK_IMG_STREAM *stream;
     char *buf;
 };
@@ -1501,19 +1502,24 @@ static int _pugfs_find_dir_entry_absolute(
     uint32_t *out_index_in_cluster,
     uint32_t *out_cluster_index
 ) {
-    if (!fs || !path || !out_entry) return -1;
+    if (!fs || !path) return -1;
     if (!_pugfs_path_is_valid(fs, path)) return -1;
 
     const struct pugfs_dir_entry *parent = &fs->root;
     PATH_TOKEN *tok = path_get_first_token(path);
     if (!tok) { // path is empty, return root dir
-        memcpy(out_entry, &fs->root, sizeof(struct pugfs_dir_entry));
+        if (out_entry) {
+            memcpy(out_entry, &fs->root, sizeof(*out_entry));
+        }
         return 0;
     }
 
+    struct pugfs_dir_entry entry;
+    memset(&entry, 0, sizeof(entry));
+
     struct pugfs_de_comparator comparator;
     comparator.cmp_func = _pugfs_compare_dir_entries_by_name;
-    memset(&comparator.cmp_entry, 0, sizeof(struct pugfs_dir_entry));
+    memset(&comparator.cmp_entry, 0, sizeof(comparator.cmp_entry));
 
     int res = 0;
     while (tok) {
@@ -1531,14 +1537,18 @@ static int _pugfs_find_dir_entry_absolute(
             fs, 
             &comparator,
             parent,
-            out_entry,
+            &entry,
             out_index_in_cluster,
             out_cluster_index
         );
         if (res != 0) break;
 
-        parent = out_entry;
+        parent = &entry;
         tok = path_get_next_token(path, tok);
+    }
+
+    if (out_entry) {
+        memcpy(out_entry, &entry, sizeof(*out_entry));
     }
     
     return res;
@@ -1677,6 +1687,7 @@ static int _pugfs_create_new_dir_entry_absolute(
     uint32_t *out_index_in_cluster,
     uint32_t *out_cluster_index
 ) {
+    if (!fs || !path) return -1;
     if (!_pugfs_path_is_valid(fs, path))
         return -1;
 
