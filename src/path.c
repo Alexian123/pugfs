@@ -19,31 +19,9 @@ struct path
     int length;
 };
 
-int path_is_valid(const char *path) {
-    if (!path) return 0;
+static int _path_parse_tokens(PATH *p, const char *path) {
+    if (!p || !path) return -1;
 
-    size_t len = strnlen(path, PATH_MAX_LEN);
-    if (len >= PATH_MAX_LEN) return 0;
-
-    return len >= 3 && isdigit((unsigned char)path[0]) && path[1] == PATH_ROOT_DELIMITER && path[2] == PATH_TOKEN_DELIMITER;
-}
-
-PATH* path_parse(const char *path, const char *crt_dir_path) {
-    (void)crt_dir_path; // Relative paths not implemented yet.
-
-    if (!path_is_valid(path)) return NULL;
-
-    // extract drive number
-    int drive = DIGIT_CHAR_TO_NUM(path[0]);
-    path += 3; // Skip "0:/"
-
-    // allocate memory for max path
-    PATH *p = (PATH*)malloc(sizeof(struct path));
-    if (!p) return NULL;
-    memset(p, 0, sizeof(*p));
-    p->drive_no = drive;
-
-    // parse tokens
     while (*path != '\0') {
         // skip repeated delimiters
         while (*path == PATH_TOKEN_DELIMITER) path++;
@@ -57,34 +35,74 @@ PATH* path_parse(const char *path, const char *crt_dir_path) {
             ++len;
         }
 
-        // check the length
-        if (len >= PATH_MAX_TOKEN_LEN) {
-            path_destroy(p);
-            return NULL;
-        }
-
-        // check number of tokens
-        if (p->length >= PATH_MAX_TOKENS) {
-            path_destroy(p);
-            return NULL;
+        // check the length & number of tokens
+        if (len >= PATH_MAX_TOKEN_LEN || p->length >= PATH_MAX_TOKENS) {
+            return -1;
         }
 
         // copy token text and append null terminator
         int curr_index = p->length;
-        struct path_token *token = &(p->tokens[curr_index]);
+        struct path_token *token = &p->tokens[curr_index];
         memcpy(token->text, path, len);
         token->text[len] = '\0';
         token->index = curr_index;
 
-        ++(p->length);
+        p->length++;
         path += len;
+    }
+
+    return 0;
+}
+
+int path_is_valid(const char *path) {
+    if (!path) return 0;
+
+    size_t len = strnlen(path, PATH_MAX_LEN);
+    if (len >= PATH_MAX_LEN) return 0;
+
+    return len >= 3 && isdigit((unsigned char)path[0]) && path[1] == PATH_ROOT_DELIMITER && path[2] == PATH_TOKEN_DELIMITER;
+}
+
+PATH* path_parse(const char *path) {
+    if (!path_is_valid(path)) return NULL;
+
+    // extract drive number
+    int drive = DIGIT_CHAR_TO_NUM(path[0]);
+    path += 3; // Skip "0:/"
+
+    // allocate memory for max path
+    PATH *p = (PATH*)malloc(sizeof(struct path));
+    if (!p) return NULL;
+    memset(p, 0, sizeof(*p));
+    p->drive_no = drive;
+
+    int res = _path_parse_tokens(p, path);
+    if (res != 0) {
+        path_destroy(p);
+        return NULL;
     }
 
     return p;
 }
 
-void path_destroy(PATH *p)
-{
+PATH* path_parse_relative(PATH *root, const char *path) {
+    if (!root || !path || root->length < 0) return NULL;
+
+    PATH *p = (PATH*)malloc(sizeof(*root));
+    if (!p) return NULL;
+
+    memcpy(p, root, sizeof(*root));
+
+    int res = _path_parse_tokens(p, path);
+    if (res != 0) {
+        path_destroy(p);
+        return NULL;
+    }
+    
+    return p;
+}
+
+void path_destroy(PATH *p) {
     if (!p) return;
     free(p);
 }

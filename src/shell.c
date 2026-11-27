@@ -15,7 +15,8 @@
 
 #define STREQ(s1, s2) (strcmp((s1), (s2)) == 0)
 
-static char working_dir[PATH_MAX_LEN + 1] = "0:/";
+static char working_dir[PATH_MAX_LEN + 1] = "";
+static PATH *working_dir_path = NULL;
 static char input_buffer[MAX_INPUT_LEN] = "";
 
 static int _shell_get_input();
@@ -30,6 +31,19 @@ static PATH* _shell_parse_path(const char *path);
 void shell_start(PUGFS *fs, DISK_IMG *img) {
     if (!fs || !img) {
         fprintf(stderr, "Failed to start shell!\nExiting...\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int drive_no = disk_img_get_drive_no(img);
+    if (drive_no < 0 || drive_no > 9) {
+        fprintf(stderr, "Disk image error!\nExiting...\n");
+        exit(EXIT_FAILURE);
+    }
+
+    snprintf(working_dir, PATH_MAX_LEN, "%d:/", drive_no);
+    working_dir_path = path_parse(working_dir);
+    if (!working_dir_path) {
+        fprintf(stderr, "Root dir path error!!\nExiting...\n");
         exit(EXIT_FAILURE);
     }
 
@@ -214,7 +228,31 @@ static int _shell_execute_1_arg(PUGFS *fs, const char *cmd, const char *arg1) {
         if (!arg1) {
             return EXIT_SUCCESS;
         }
-        strncpy(working_dir, arg1, PATH_MAX_LEN);
+
+        PATH *p = NULL;
+        if (STREQ(arg1, "..")) { 
+            // handle "cd .."
+            p = path_get_parent_path(working_dir_path);
+        } else {
+            // create new path either absolute or relative to working dir
+            p = _shell_parse_path(arg1);
+        }
+        if (!p) return EXEC_ERR_GENERAL;
+        
+        // check if new path points to a valid dir
+        int res = pugfs_lsdir_begin(fs, p); // lsdir_begin is suitable for this :)
+        if (res < 0) { // failed to cd
+            path_destroy(p);
+            return res;
+        }
+
+        // delete old path and replace with new
+        path_destroy(working_dir_path);
+        working_dir_path = p;
+
+        // update string buffer
+        path_to_string(p, working_dir);
+
         return EXIT_SUCCESS;
     }
     return EXEC_CONTINUE;
@@ -301,6 +339,8 @@ static void _shell_print_help() {
 }
 
 static PATH* _shell_parse_path(const char *path) {
-    if (!path_is_valid(path)) return NULL;
-    return path_parse(path, NULL);
+    if (path_is_valid(path)) {
+        return path_parse(path);
+    }
+    return path_parse_relative(working_dir_path, path);
 }

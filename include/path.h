@@ -11,7 +11,8 @@ typedef struct path PATH;
 typedef struct path_token PATH_TOKEN;
 
 int path_is_valid(const char *path);
-PATH* path_parse(const char *path, const char *crt_dir_path);
+PATH* path_parse(const char *path);
+PATH* path_parse_relative(PATH *root, const char *path);
 void path_destroy(PATH *p);
 int path_to_string(PATH *p, char *out);
 
